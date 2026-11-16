@@ -1,0 +1,826 @@
+"""Рубрики постів у боті: оформлення тексту, промти й генерація зображень через OpenAI.
+
+Підмішується до CardBot (bot/main.py): екрани меню, стани введення, обробники кнопок.
+Префікси callback_data:
+    pm:  — меню рубрик і налаштування рубрики
+    p:   — дії над чернеткою поста
+    o:   — налаштування OpenAI
+    sm:  — зразки постів (аналіз стилю)
+"""
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import io
+import json
+import logging
+import os
+import time
+from pathlib import Path
+
+from telegram import InputFile
+from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest
+
+from textcard import render as R
+
+from . import content as C
+from . import openai_api as O
+
+log = logging.getLogger("textcard-bot.posts")
+
+IMAGE_LIMIT = int(os.environ.get("IMAGE_LIMIT_PER_DAY", "20"))
+GENERATED_KEEP = int(os.environ.get("GENERATED_TEMPLATES_KEEP", "20"))
+MAX_POST_CHARS = int(os.environ.get("MAX_POST_CHARS", "3000"))
+
+
+def esc(s) -> str:
+    import html
+    return html.escape(str(s), quote=False)
+
+
+class PostsMixin:
+    # ------------------------------------------------------------ OpenAI: налаштування
+
+    def oai_cfg(self) -> dict:
+        base = {"key": os.environ.get("OPENAI_API_KEY", ""), "text_model": O.DEFAULT_TEXT_MODEL,
+                "image_model": O.DEFAULT_IMAGE_MODEL, "base_url": O.DEFAULT_BASE_URL,
+                "quality": "high", "limit": IMAGE_LIMIT, "autosample": True}
+        return {**base, **(self.db.kv_get("openai", {}) or {})}
+
+    def oai_set(self, **kw) -> dict:
+        cfg = self.oai_cfg()
+        cfg.update(kw)
+        self.db.kv_set("openai", cfg)
+        return cfg
+
+    def oai(self) -> O.OpenAIClient:
+        c = self.oai_cfg()
+        return O.OpenAIClient(c["key"], c["base_url"], c["text_model"], c["image_model"])
+
+    def oai_ready(self) -> bool:
+        return bool(self.oai_cfg()["key"])
+
+    def image_quota_left(self, uid: int) -> int:
+        limit = int(self.oai_cfg().get("limit") or 0)
+        if limit <= 0:
+            return 10 ** 6
+        return max(0, limit - self.db.usage_count(uid, "image", 24))
+
+    # ------------------------------------------------------------ стиль рубрики
+
+    def style_of(self, kind_id: str) -> dict:
+        return self.db.kv_get(f"style:{kind_id}", {}) or {}
+
+    async def style_profile(self, kind_id: str, *, rebuild: bool = False) -> str:
+        """Опис стилю рубрики, виведений із зразків. Перебудовується, коли зразків побільшало."""
+        kind = C.KINDS[kind_id]
+        rows = self.db.samples(kind_id, 12)
+        saved = self.style_of(kind_id)
+        n = self.db.samples_count(kind_id)
+        if not rebuild and saved.get("profile") and saved.get("n") == n:
+            return saved["profile"]
+        if n < 2 or not self.oai_ready():
+            return saved.get("profile", "") if not rebuild else ""
+        sys, user = C.style_profile_messages(kind, [r["text"] for r in rows])
+        try:
+            profile = C.strip_markup(await self.oai().chat(sys, user, max_tokens=700))
+        except O.OpenAIError as e:
+            log.info("не вдалося описати стиль %s: %s", kind_id, e)
+            return saved.get("profile", "")
+        self.db.kv_set(f"style:{kind_id}", {"profile": profile, "n": n, "updated": time.time()})
+        return profile
+
+    # ------------------------------------------------------------ побудова тексту й промту
+
+    async def build_text(self, uid: int, kind_id: str, source: str, *, compose: bool = False,
+                         extra: str = "") -> tuple[str, bool]:
+        """Повертає (оформлений текст, чи використано GPT)."""
+        kind = C.KINDS[kind_id]
+        if not self.oai_ready():
+            if compose:
+                raise O.OpenAIError("Щоб складати тексти, потрібен ключ OpenAI: "
+                                    "🛠 Адміністрування → 🤖 OpenAI. Поки що надішліть свій текст — я його оформлю.")
+            return C.local_format(kind, source, self.post_cfg(kind_id).get("hashtags", "")), False
+        profile = await self.style_profile(kind_id)
+        samples = [r["text"] for r in self.db.samples(kind_id, 3)]
+        mk = C.compose_messages if compose else C.format_messages
+        sys, user = mk(kind, source, profile, samples, extra)
+        out = C.strip_markup(await self.oai().chat(sys, user, max_tokens=1500))
+        if kind.output == "post":
+            tags = self.post_cfg(kind_id).get("hashtags", "").strip()
+            if tags and tags.lower() not in out.lower():
+                out = out.rstrip() + "\n\n" + tags
+        self.db.add_usage(uid, "text")
+        return out.strip(), True
+
+    async def build_prompt(self, uid: int, kind_id: str, text: str, extra: str = "") -> tuple[str, bool]:
+        kind = C.KINDS[kind_id]
+        if not self.oai_ready():
+            return C.local_image_prompt(kind, text), False
+        sys, user = C.image_prompt_messages(kind, text, extra)
+        try:
+            p = C.strip_markup(await self.oai().chat(sys, user, max_tokens=600))
+        except O.OpenAIError as e:
+            log.info("промт через GPT не вийшов: %s", e)
+            return C.local_image_prompt(kind, text), False
+        self.db.add_usage(uid, "text")
+        if "no text" not in p.lower():
+            p += " No text, no letters, no captions, no watermark."
+        return p.strip(), True
+
+    async def gen_image(self, uid: int, prompt: str, width: int, height: int) -> bytes:
+        cfg = self.oai_cfg()
+        if self.image_quota_left(uid) <= 0:
+            raise O.OpenAIError(f"Вичерпано денний ліміт генерацій зображень ({cfg['limit']} на добу). "
+                                "Ліміт змінюється в 🛠 Адміністрування → 🤖 OpenAI.")
+        data = await self.oai().image(prompt, O.pick_size(width, height), quality=cfg.get("quality", "high"))
+        self.db.add_usage(uid, "image")
+        log.info("user %s: згенеровано зображення (%d КБ)", uid, len(data) // 1024)
+        return data
+
+    # ------------------------------------------------------------ налаштування рубрики
+
+    def post_cfg(self, kind_id: str) -> dict:
+        kind = C.KINDS[kind_id]
+        base = {"template": kind.template, "hashtags": kind.hashtags, "title": kind.title or "",
+                "gpt": True, "extra": ""}
+        return {**base, **(self.db.kv_get(f"kind:{kind_id}", {}) or {})}
+
+    def post_cfg_set(self, kind_id: str, **kw) -> dict:
+        cfg = self.post_cfg(kind_id)
+        cfg.update(kw)
+        self.db.kv_set(f"kind:{kind_id}", cfg)
+        return cfg
+
+    # ------------------------------------------------------------ екрани
+
+    def posts_screen(self, uid: int, name: str, arg: str = ""):
+        from .main import kb  # локальний імпорт, щоб не було циклічного на рівні модуля
+        back = [("⬅️ Назад", "m:main")]
+
+        if name == "posts":
+            rows = [[(f"{k.emoji} {k.name}", f"pm:go:{k.id}")] for k in (C.KINDS[i] for i in C.ORDER)]
+            rows.append([("⚙️ Налаштування рубрик", "m:kinds")])
+            rows.append(back)
+            gpt = "✅ підключений" if self.oai_ready() else "⚠️ не підключений (оформлення буде простим)"
+            return ("📝 <b>Пости</b>\nВиберіть рубрику — я попрошу текст і оформлю його.\n"
+                    f"ChatGPT: {gpt}"), kb(rows)
+
+        if name == "kinds":
+            rows = [[(f"{C.KINDS[i].emoji} {C.KINDS[i].name}", f"pm:cfg:{i}")] for i in C.ORDER]
+            rows.append(back)
+            return "⚙️ <b>Налаштування рубрик</b>\nШаблон листівки, заголовок, хештеги, зразки для стилю.", kb(rows)
+
+        if name == "kindcfg":
+            k = C.KINDS[arg]
+            cfg = self.post_cfg(arg)
+            n = self.db.samples_count(arg)
+            prof = self.style_of(arg).get("profile", "")
+            text = (f"{k.emoji} <b>{esc(k.name)}</b>\n\n"
+                    f"🖼 Шаблон листівки: <b>{esc(self.t_name(cfg['template']))}</b>\n"
+                    + (f"🏷 Заголовок: <b>{esc(cfg['title']) or '—'}</b>\n" if k.output == "card" else "")
+                    + (f"#️⃣ Хештеги: {esc(cfg['hashtags']) or '—'}\n" if k.output == "post" else "")
+                    + f"🧩 Зразків для стилю: <b>{n}</b>"
+                    + (" · стиль описано ✅" if prof else "")
+                    + (f"\n💬 Побажання до оформлення: {esc(cfg['extra'])}" if cfg["extra"] else "")
+                    + (f"\n📅 Фото дня: папка <code>{esc(C.PHOTOS_DIR)}</code>, файл <code>ddmm.jpg</code>"
+                       if k.use_day_photo else ""))
+            rows = [[("🖼 Шаблон листівки", f"pm:tpl:{arg}")],
+                    [("🏷 Заголовок", f"pm:title:{arg}")] if k.output == "card" else
+                    [("#️⃣ Хештеги", f"pm:tags:{arg}")],
+                    [(f"🧩 Зразки стилю ({n})", f"sm:list:{arg}")],
+                    [("💬 Побажання до оформлення", f"pm:extra:{arg}")],
+                    [(f"{k.emoji} Створити пост", f"pm:go:{arg}")],
+                    [("⬅️ Назад", "m:kinds")]]
+            return text, kb(rows)
+
+        if name == "samples":
+            k = C.KINDS[arg]
+            rows = [[("➕ Додати зразки", f"sm:add:{arg}")]]
+            items = self.db.samples(arg, 8)
+            for r in items:
+                rows.append([(("🗑 " + r["text"].replace("\n", " ")[:38]), f"sm:del:{r['id']}:{arg}")])
+            if items:
+                rows.append([("🧠 Описати стиль заново", f"sm:style:{arg}"), ("🧹 Очистити всі", f"sm:clear:{arg}")])
+            rows.append([("⬅️ Назад", f"pm:cfg:{arg}")])
+            n = self.db.samples_count(arg)
+            prof = self.style_of(arg).get("profile", "")
+            text = (f"🧩 <b>Зразки стилю: {esc(k.name)}</b>\n\n"
+                    f"Збережено постів: <b>{n}</b> (показано {len(items)}).\n"
+                    "Надішліть або перешліть у бота кілька своїх попередніх постів цієї рубрики — "
+                    "я аналізуватиму їхній тон, довжину й ритм, і нові тексти звучатимуть так само.\n"
+                    + (f"\n<b>Опис стилю:</b>\n{esc(prof[:600])}" if prof else
+                       "\nОпис стилю з'явиться після 2+ зразків (потрібен ключ OpenAI)."))
+            return text, kb(rows)
+
+        if name == "oai" and self.is_admin(uid):
+            c = self.oai_cfg()
+            text = ("🤖 <b>OpenAI (ChatGPT)</b>\n\n"
+                    f"🔑 Ключ: <b>{esc(O.mask_key(c['key']))}</b>\n"
+                    f"💬 Модель тексту: <code>{esc(c['text_model'])}</code>\n"
+                    f"🖼 Модель зображень: <code>{esc(c['image_model'])}</code>\n"
+                    f"✨ Якість зображень: {esc(c['quality'])}\n"
+                    f"📊 Ліміт зображень: {c['limit']} на добу на людину"
+                    + (f"\n🌐 Адреса API: <code>{esc(c['base_url'])}</code>" if c["base_url"] != O.DEFAULT_BASE_URL else "")
+                    + "\n\nКлюч беруть на platform.openai.com → API keys. Генерація тексту й зображень "
+                      "оплачується з вашого рахунку OpenAI.")
+            rows = [[("🔑 Ввести ключ", "i:oai_key")] + ([("🗑 Прибрати ключ", "o:clearkey")] if c["key"] else []),
+                    [("💬 Модель тексту", "o:models:text"), ("🖼 Модель зображень", "o:models:image")],
+                    [("✨ Якість", "o:quality"), ("📊 Ліміт", "i:oai_limit")],
+                    [("🌐 Адреса API", "i:oai_url")],
+                    [("✅ Перевірити ключ", "o:check")],
+                    [("⬅️ Назад", "m:admin")]]
+            return text, kb(rows)
+
+        if name == "models" and self.is_admin(uid):
+            which = "image" if arg.startswith("image") else "text"
+            c = self.oai_cfg()
+            cur = c[f"{which}_model"]
+            cached = self.db.kv_get("models", {}) or {}
+            avail = cached.get(which) or []
+            if not avail:
+                avail = ([O.DEFAULT_IMAGE_MODEL, "gpt-image-1", "gpt-image-1-mini"] if which == "image"
+                         else [O.DEFAULT_TEXT_MODEL, "gpt-5.4", "gpt-5.4-nano"])
+            btns = [(("✅ " if m == cur else "") + m, f"o:setmodel:{which}:{m}") for m in avail[:24]]
+            rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+            rows.append([("🔄 Оновити список з OpenAI", f"o:fetch:{which}"), ("✏️ Ввести назву", f"i:oai_model_{which}")])
+            rows.append([("⬅️ Назад", "m:oai")])
+            label = "зображень" if which == "image" else "тексту"
+            note = "" if cached.get(which) else "\nСписок типовий; «Оновити» підтягне моделі, доступні вашому ключу."
+            return f"🖼 <b>Модель {label}</b>\nЗараз: <code>{esc(cur)}</code>{note}", kb(rows)
+
+        if name == "quality" and self.is_admin(uid):
+            c = self.oai_cfg()
+            rows = [[(("✅ " if c["quality"] == q else "") + n, f"o:quality:{q}")]
+                    for q, n in (("low", "низька (найдешевше)"), ("medium", "середня"),
+                                 ("high", "висока (типово)"), ("auto", "хай вирішує модель"))]
+            rows.append([("⬅️ Назад", "m:oai")])
+            return "✨ <b>Якість зображень</b>\nВища якість — довше й дорожче.", kb(rows)
+
+        if name == "kindtpl":
+            ts = self.store.all()
+            cur = self.post_cfg(arg)["template"]
+            btns = [((("✅ " if t.id == cur else "") + t.config.get("name", t.id)), f"pm:settpl:{arg}:{t.id}")
+                    for t in ts[:24]]
+            rows = [btns[i:i + 2] for i in range(0, len(btns), 2)]
+            rows.append([("⬅️ Назад", f"pm:cfg:{arg}")])
+            return f"🖼 <b>Шаблон для рубрики «{esc(C.KINDS[arg].name)}»</b>", kb(rows)
+
+        return self.screen(uid, "main")
+
+    # ------------------------------------------------------------ потік рубрики
+
+    async def start_kind(self, ctx, chat_id: int, uid: int, kind_id: str):
+        k = C.KINDS[kind_id]
+        self.db.set_state(uid, f"post:{kind_id}", {})
+        hint = ""
+        if k.use_day_photo:
+            p = C.day_photo()
+            hint = ("\n\n📅 Фото на сьогодні: " + (f"знайдено ({p.name})" if p else
+                    "немає у папці — надішліть його після тексту або згенеруємо картинку."))
+        if not self.oai_ready():
+            hint += "\n\n⚠️ Ключ OpenAI не заданий: оформлю текст простими засобами, без аналізу стилю."
+        await ctx.bot.send_message(chat_id, f"{k.emoji} <b>{esc(k.name)}</b>\n\n{esc(k.ask)}{hint}"
+                                            "\n\n/cancel — скасувати.", parse_mode=ParseMode.HTML)
+
+    def draft_kb(self, draft, extra_note: str = ""):
+        from .main import kb
+        k = C.KINDS[draft["kind"]]
+        did = draft["id"]
+        rows = [[("🔄 Інший варіант", f"p:redo:{did}"), ("📋 Мій текст", f"p:src:{did}")]]
+        if self.oai_ready():
+            rows.append([("🎨 Промт картинки", f"p:prompt:{did}"), ("🖌 Згенерувати картинку", f"p:gen:{did}")])
+        else:
+            rows.append([("🎨 Промт картинки", f"p:prompt:{did}")])
+        line = []
+        if k.output == "card":
+            line.append(("✂️ Скоротити текст", f"p:short:{did}"))
+        if k.output == "post":
+            line.append(("🖼 Зробити листівку", f"p:card:{did}"))
+        if k.use_day_photo:
+            line.append(("📅 Фото дня", f"p:photo:{did}"))
+        if line:
+            rows.append(line)
+        rows.append([("💾 У зразки стилю", f"p:sample:{did}"), ("✖️ Закрити", "x")])
+        return kb(rows)
+
+    async def send_draft(self, ctx, chat_id: int, uid: int, did: str, note: str = ""):
+        """Показує чернетку: пост текстом (+фото дня) або листівку."""
+        d = self.db.draft(did)
+        if not d:
+            return await ctx.bot.send_message(chat_id, "Чернетку не знайдено — почніть рубрику заново.")
+        k = C.KINDS[d["kind"]]
+        text = d["text"]
+        if k.output == "card":
+            return await self.send_draft_card(ctx, chat_id, uid, d, note)
+        photo = C.day_photo() if k.use_day_photo else None
+        parts = C.split_for_telegram(text, bool(photo))
+        try:
+            if photo:
+                with photo.open("rb") as fh:
+                    await ctx.bot.send_photo(chat_id, InputFile(fh, filename=photo.name), caption=parts[0],
+                                             reply_markup=self.draft_kb(d) if len(parts) == 1 else None)
+            else:
+                await ctx.bot.send_message(chat_id, parts[0],
+                                           reply_markup=self.draft_kb(d) if len(parts) == 1 else None)
+        except BadRequest as e:
+            log.info("не вдалося надіслати пост: %s", e)
+            await ctx.bot.send_message(chat_id, parts[0])
+        for i, p in enumerate(parts[1:], 1):
+            await ctx.bot.send_message(chat_id, p, reply_markup=self.draft_kb(d) if i == len(parts) - 1 else None)
+        tail = note or ("📅 Фото на сьогодні додано." if photo else
+                        ("📅 Фото на сьогодні у папці немає — надішліть його кнопкою «Фото дня» або згенеруйте картинку."
+                         if k.use_day_photo else ""))
+        if tail:
+            await ctx.bot.send_message(chat_id, tail, parse_mode=ParseMode.HTML)
+
+    async def send_draft_card(self, ctx, chat_id: int, uid: int, d, note: str = ""):
+        k = C.KINDS[d["kind"]]
+        cfg = self.post_cfg(d["kind"])
+        extra = json.loads(d["extra"] or "{}")
+        tpl = extra.get("template") or cfg["template"]
+        title = extra.get("title", cfg.get("title") or "")
+        await ctx.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
+        try:
+            t, res, photo, _ = await self.render(uid, d["text"], title, template_id=tpl,
+                                                 s={**self.st(uid), "send_as": "photo"})
+        except (R.RenderError, KeyError) as e:
+            return await ctx.bot.send_message(
+                chat_id, f"⚠️ {esc(e)}\n\nТекст можна скоротити кнопкою «Інший варіант» або надіслати свій.",
+                parse_mode=ParseMode.HTML, reply_markup=self.draft_kb(d))
+        caption = note or (("⚠️ " + "; ".join(res.warnings)) if res.warnings else None)
+        m = await ctx.bot.send_photo(chat_id, InputFile(io.BytesIO(photo), filename=f"card-{d['kind']}.jpg"),
+                                     caption=caption, reply_markup=self.draft_kb(d))
+        self.db.add_render(chat_id, m.message_id, uid, d["text"], title)
+
+    async def make_draft(self, ctx, chat_id: int, uid: int, kind_id: str, source: str, *, compose: bool = False):
+        k = C.KINDS[kind_id]
+        await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
+        wait = None
+        if self.oai_ready():
+            wait = await ctx.bot.send_message(chat_id, "⏳ Оформлюю текст…")
+        try:
+            text, used = await self.build_text(uid, kind_id, source, compose=compose,
+                                               extra=self.post_cfg(kind_id).get("extra", ""))
+        except O.OpenAIError as e:
+            if wait:
+                await self._del(ctx, chat_id, wait.message_id)
+            text = C.local_format(k, source, self.post_cfg(kind_id).get("hashtags", "")) if not compose else ""
+            if not text:
+                return await ctx.bot.send_message(chat_id, f"⚠️ {esc(e)}", parse_mode=ParseMode.HTML)
+            did = self.db.add_draft(uid, kind_id, source, text)
+            await ctx.bot.send_message(chat_id, f"⚠️ {esc(e)}\nОформив простими засобами:", parse_mode=ParseMode.HTML)
+            return await self.send_draft(ctx, chat_id, uid, did)
+        if wait:
+            await self._del(ctx, chat_id, wait.message_id)
+        if len(text) > MAX_POST_CHARS:
+            text = text[:MAX_POST_CHARS].rstrip()
+        did = self.db.add_draft(uid, kind_id, source, text)
+        note = "" if used else "ℹ️ Оформлено без ChatGPT."
+        await self.send_draft(ctx, chat_id, uid, did, note)
+        if self.oai_cfg().get("autosample", True) and used and k.output == "post":
+            self.db.add_sample(kind_id, text, uid)
+        return did
+
+    async def _del(self, ctx, chat_id: int, mid: int):
+        try:
+            await ctx.bot.delete_message(chat_id, mid)
+        except BadRequest:
+            pass
+
+    # ------------------------------------------------------------ генерація фону / картинки
+
+    async def do_generate(self, ctx, chat_id: int, uid: int, did: str):
+        d = self.db.draft(did)
+        if not d:
+            return await ctx.bot.send_message(chat_id, "Чернетку не знайдено.")
+        k = C.KINDS[d["kind"]]
+        prompt = d["prompt"]
+        if not prompt:
+            prompt, _ = await self.build_prompt(uid, d["kind"], d["text"])
+            self.db.update_draft(did, prompt=prompt)
+        s = self.st(uid)
+        try:
+            w, h = R.parse_size(s["size"], "1280x782")
+        except R.RenderError:
+            w, h = 1280, 782
+        if k.output == "post":
+            w, h = 1536, 1024
+        wait = await ctx.bot.send_message(chat_id, "🖌 Малюю зображення через ChatGPT… це може зайняти до хвилини.")
+        await ctx.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
+        try:
+            data = await self.gen_image(uid, prompt, w, h)
+        except O.OpenAIError as e:
+            await self._del(ctx, chat_id, wait.message_id)
+            return await ctx.bot.send_message(chat_id, f"⚠️ {esc(e)}", parse_mode=ParseMode.HTML)
+        await self._del(ctx, chat_id, wait.message_id)
+        left = self.image_quota_left(uid)
+        tail = f" Залишилось сьогодні: {left}." if left < 10 ** 5 else ""
+        if k.output == "post":
+            await ctx.bot.send_photo(chat_id, InputFile(io.BytesIO(data), filename="illustration.png"),
+                                     caption=f"🖼 Картинка до посту.{tail}", reply_markup=self.draft_kb(d))
+            return
+        # для листівки: фон стає шаблоном, одразу малюємо листівку з текстом
+        name = f"{k.emoji} {dt.date.today():%d.%m} {time.strftime('%H:%M')}"
+        try:
+            t = await asyncio.to_thread(self.store.create, name, data, self.post_cfg(d["kind"])["template"])
+            cfg = dict(t.config)
+            cfg.update(owner=uid, generated=True, prompt=prompt[:900])
+            t = self.store.update(t.id, cfg)
+        except (R.RenderError, KeyError) as e:
+            return await ctx.bot.send_message(chat_id, f"⚠️ Зображення не вдалося зберегти: {esc(e)}",
+                                              parse_mode=ParseMode.HTML)
+        self.cleanup_generated(uid)
+        extra = json.loads(d["extra"] or "{}")
+        extra["template"] = t.id
+        self.db.update_draft(did, extra=extra)
+        self.set_st(uid, template=t.id)
+        await self.send_draft(ctx, chat_id, uid, did, note=f"🎨 Новий фон від ChatGPT.{tail}")
+
+    def cleanup_generated(self, uid: int) -> None:
+        mine = [t for t in self.store.all() if t.custom and t.config.get("generated") and t.config.get("owner") == uid]
+        for t in mine[:-GENERATED_KEEP] if len(mine) > GENERATED_KEEP else []:
+            try:
+                self.store.delete(t.id)
+            except (KeyError, PermissionError):
+                pass
+
+    async def regenerate_card_background(self, ctx, chat_id: int, uid: int, text: str, title):
+        """Кнопка «🎨 Новий фон» під звичайною листівкою (поза рубриками)."""
+        did = self.db.add_draft(uid, "morning", text, text, None, {"title": title if title is not None else None})
+        if title is not None:
+            self.db.update_draft(did, extra={"title": title})
+        await self.do_generate(ctx, chat_id, uid, did)
+
+    # ------------------------------------------------------------ стани введення тексту
+
+    POST_PROMPTS = {
+        "oai_key": "🔑 Надішліть ключ OpenAI (починається з sk-…). Повідомлення з ключем я одразу видалю. /cancel — скасувати.",
+        "oai_limit": "📊 Скільки зображень на добу дозволити одній людині? Число (0 — без ліміту). /cancel — скасувати.",
+        "oai_url": "🌐 Надішліть адресу API (напр. https://api.openai.com/v1). /cancel — скасувати.",
+        "oai_model_text": "✏️ Надішліть назву моделі для тексту, напр. gpt-5.4-mini. /cancel — скасувати.",
+        "oai_model_image": "✏️ Надішліть назву моделі для зображень, напр. gpt-image-1.5. /cancel — скасувати.",
+    }
+
+    async def posts_text(self, ctx, msg, uid: int, state: str, data: dict, text: str) -> bool:
+        """Обробляє текст, якщо він належить до рубрик/налаштувань. True — текст оброблено."""
+        from .main import kb
+        chat_id = msg.chat_id
+
+        if state and state.startswith("post:"):
+            kind_id = state.split(":", 1)[1]
+            if kind_id not in C.KINDS:
+                self.db.set_state(uid, None)
+                return False
+            src = text.strip()
+            if len(src) > MAX_POST_CHARS:
+                await msg.reply_text(f"⚠️ Задовгий текст: {len(src)} символів, максимум {MAX_POST_CHARS}.")
+                return True
+            self.db.set_state(uid, None)
+            if C.KINDS[kind_id].compose:
+                did = self.db.add_draft(uid, kind_id, src, "")
+                await msg.reply_text(
+                    "Що зробити з цим текстом?",
+                    reply_markup=kb([[("✍️ Скласти привітання", f"p:compose:{did}")],
+                                     [("🎨 Оформити мій текст", f"p:format:{did}")]]))
+                return True
+            await self.make_draft(ctx, chat_id, uid, kind_id, src)
+            return True
+
+        if state and state.startswith("sample:"):
+            kind_id = state.split(":", 1)[1]
+            ok = self.db.add_sample(kind_id, text.strip(), uid)
+            n = self.db.samples_count(kind_id)
+            await msg.reply_text(("✅ Зразок додано." if ok else "ℹ️ Такий зразок уже є або він надто короткий.")
+                                 + f" Усього: {n}.\nНадішліть ще або /cancel, щоб завершити.")
+            return True
+
+        if state and state.startswith("editprompt:"):
+            did = state.split(":", 1)[1]
+            self.db.update_draft(did, prompt=text.strip()[:3000])
+            self.db.set_state(uid, None)
+            d = self.db.draft(did)
+            await msg.reply_text("✅ Промт збережено.",
+                                 reply_markup=kb([[("🖌 Згенерувати картинку", f"p:gen:{did}")]] if self.oai_ready() else []))
+            return True
+
+        if state and state.startswith("kindtags:"):
+            kind_id = state.split(":", 1)[1]
+            self.post_cfg_set(kind_id, hashtags=" ".join(text.split())[:200])
+            self.db.set_state(uid, None)
+            t, m = self.posts_screen(uid, "kindcfg", kind_id)
+            await msg.reply_text(t, parse_mode=ParseMode.HTML, reply_markup=m)
+            return True
+
+        if state and state.startswith("kindtitle:"):
+            kind_id = state.split(":", 1)[1]
+            val = " ".join(text.split())[:80]
+            self.post_cfg_set(kind_id, title="" if val in ("-", "—") else val)
+            self.db.set_state(uid, None)
+            t, m = self.posts_screen(uid, "kindcfg", kind_id)
+            await msg.reply_text(t, parse_mode=ParseMode.HTML, reply_markup=m)
+            return True
+
+        if state and state.startswith("kindextra:"):
+            kind_id = state.split(":", 1)[1]
+            val = " ".join(text.split())[:300]
+            self.post_cfg_set(kind_id, extra="" if val in ("-", "—") else val)
+            self.db.set_state(uid, None)
+            t, m = self.posts_screen(uid, "kindcfg", kind_id)
+            await msg.reply_text(t, parse_mode=ParseMode.HTML, reply_markup=m)
+            return True
+
+        if state in ("oai_key", "oai_limit", "oai_url", "oai_model_text", "oai_model_image"):
+            if not self.is_admin(uid):
+                self.db.set_state(uid, None)
+                return True
+            val = text.strip()
+            if state == "oai_key":
+                await self._del(ctx, chat_id, msg.message_id)   # ключ не має лишатися в чаті
+                if not O.looks_like_key(val):
+                    await ctx.bot.send_message(chat_id, "⚠️ Це не схоже на ключ OpenAI. Спробуйте ще раз або /cancel.")
+                    return True
+                self.oai_set(key=val)
+                self.db.set_state(uid, None)
+                await ctx.bot.send_message(chat_id, f"🔑 Ключ збережено ({O.mask_key(val)}). Повідомлення з ключем видалено.")
+                t, m = self.posts_screen(uid, "oai")
+                await ctx.bot.send_message(chat_id, t, parse_mode=ParseMode.HTML, reply_markup=m)
+                return True
+            if state == "oai_limit":
+                if not val.isdigit():
+                    await msg.reply_text("Потрібне число. /cancel — скасувати.")
+                    return True
+                self.oai_set(limit=int(val))
+            elif state == "oai_url":
+                if not val.startswith(("http://", "https://")):
+                    await msg.reply_text("Адреса має починатися з http:// або https://. /cancel — скасувати.")
+                    return True
+                self.oai_set(base_url=val.rstrip("/"))
+            else:
+                which = "text" if state.endswith("text") else "image"
+                self.oai_set(**{f"{which}_model": val[:80]})
+            self.db.set_state(uid, None)
+            t, m = self.posts_screen(uid, "oai")
+            await msg.reply_text(t, parse_mode=ParseMode.HTML, reply_markup=m)
+            return True
+
+        return False
+
+    async def posts_image(self, ctx, msg, uid: int, state: str, data: dict) -> bool:
+        """Фото для «фото дня». True — оброблено тут."""
+        if state != "dayphoto":
+            return False
+        f = msg.photo[-1] if msg.photo else msg.document
+        if msg.document and not (msg.document.mime_type or "").startswith("image/"):
+            await msg.reply_text("Це не зображення.")
+            return True
+        tg = await f.get_file()
+        raw = bytes(await tg.download_as_bytearray())
+        date = dt.date.today()
+        target = C.photo_target(date)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            img = await asyncio.to_thread(self._to_jpeg, raw)
+            target.write_bytes(img)
+        except (OSError, ValueError) as e:
+            await msg.reply_text(f"⚠️ Не вдалося зберегти фото: {e}")
+            return True
+        self.db.set_state(uid, None)
+        await msg.reply_text(f"✅ Фото збережено як {target.name} у папці фото — воно підставлятиметься сьогодні.")
+        did = (data or {}).get("draft")
+        if did and self.db.draft(did):
+            await self.send_draft(ctx, msg.chat_id, uid, did)
+        return True
+
+    @staticmethod
+    def _to_jpeg(raw: bytes) -> bytes:
+        from PIL import Image, ImageOps
+        im = Image.open(io.BytesIO(raw))
+        im.load()
+        im = ImageOps.exif_transpose(im).convert("RGB")
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=92, optimize=True)
+        return buf.getvalue()
+
+    # ------------------------------------------------------------ кнопки
+
+    async def posts_callback(self, q, ctx, uid: int, parts: list[str]) -> bool:
+        from .main import kb
+        chat_id = q.message.chat_id
+        kind = parts[0]
+
+        async def show(name: str, arg: str = ""):
+            text, markup = self.posts_screen(uid, name, arg)
+            try:
+                await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    await ctx.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+        if kind == "pm":
+            act = parts[1]
+            if act == "go":
+                await q.answer()
+                return await self.start_kind(ctx, chat_id, uid, parts[2]) or True
+            if act == "cfg":
+                await q.answer()
+                await show("kindcfg", parts[2])
+                return True
+            if act == "tpl":
+                await q.answer()
+                await show("kindtpl", parts[2])
+                return True
+            if act == "settpl":
+                self.post_cfg_set(parts[2], template=parts[3])
+                await q.answer("Збережено")
+                await show("kindcfg", parts[2])
+                return True
+            if act in ("tags", "title", "extra"):
+                await q.answer()
+                state = {"tags": "kindtags", "title": "kindtitle", "extra": "kindextra"}[act]
+                self.db.set_state(uid, f"{state}:{parts[2]}")
+                hint = {"tags": "#️⃣ Надішліть хештеги одним рядком (або «-», щоб прибрати).",
+                        "title": "🏷 Надішліть заголовок листівки для цієї рубрики (або «-», щоб без заголовка).",
+                        "extra": "💬 Надішліть побажання до оформлення, напр. «коротше, без емодзі» (або «-»)."}[act]
+                await ctx.bot.send_message(chat_id, hint + " /cancel — скасувати.")
+                return True
+
+        if kind == "sm":
+            act = parts[1]
+            if act == "list":
+                await q.answer()
+                await show("samples", parts[2])
+                return True
+            if act == "add":
+                self.db.set_state(uid, f"sample:{parts[2]}")
+                await q.answer()
+                await ctx.bot.send_message(
+                    chat_id, f"🧩 Надсилайте або пересилайте сюди попередні пости рубрики "
+                             f"«{C.KINDS[parts[2]].name}» — один пост = одне повідомлення.\n"
+                             "Коли закінчите — /cancel.")
+                return True
+            if act == "del":
+                self.db.delete_sample(int(parts[2]))
+                await q.answer("Видалено")
+                await show("samples", parts[3])
+                return True
+            if act == "clear":
+                n = self.db.clear_samples(parts[2])
+                self.db.kv_set(f"style:{parts[2]}", {})
+                await q.answer(f"Видалено зразків: {n}")
+                await show("samples", parts[2])
+                return True
+            if act == "style":
+                if not self.oai_ready():
+                    await q.answer("Потрібен ключ OpenAI", show_alert=True)
+                    return True
+                await q.answer("Аналізую стиль…")
+                p = await self.style_profile(parts[2], rebuild=True)
+                if not p:
+                    await ctx.bot.send_message(chat_id, "Не вдалося описати стиль: потрібно хоча б 2 зразки.")
+                await show("samples", parts[2])
+                return True
+
+        if kind == "o":
+            if not self.is_admin(uid):
+                await q.answer("Лише для адміністраторів", show_alert=True)
+                return True
+            act = parts[1]
+            if act == "clearkey":
+                self.oai_set(key="")
+                await q.answer("Ключ прибрано")
+                await show("oai")
+                return True
+            if act == "models":
+                await q.answer()
+                await show("models", parts[2])
+                return True
+            if act == "setmodel":
+                self.oai_set(**{f"{parts[2]}_model": parts[3]})
+                await q.answer("Збережено")
+                await show("models", parts[2])
+                return True
+            if act == "fetch":
+                await q.answer("Питаю OpenAI…")
+                try:
+                    ms = await self.oai().models()
+                except O.OpenAIError as e:
+                    await ctx.bot.send_message(chat_id, f"⚠️ {esc(e)}", parse_mode=ParseMode.HTML)
+                    return True
+                cache = {"text": [m for m in ms if m.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")) and "image" not in m],
+                         "image": [m for m in ms if "image" in m]}
+                self.db.kv_set("models", cache)
+                await show("models", parts[2])
+                return True
+            if act == "quality":
+                if len(parts) > 2:
+                    self.oai_set(quality=parts[2])
+                    await q.answer("Збережено")
+                    await show("oai")
+                else:
+                    await q.answer()
+                    await show("quality")
+                return True
+            if act == "check":
+                await q.answer("Перевіряю…")
+                try:
+                    res = await self.oai().check()
+                except O.OpenAIError as e:
+                    res = f"⚠️ {e}"
+                await ctx.bot.send_message(chat_id, esc(res), parse_mode=ParseMode.HTML)
+                return True
+
+        if kind == "p":
+            act, did = parts[1], parts[2]
+            d = self.db.draft(did)
+            if not d:
+                await q.answer("Чернетка застаріла — почніть рубрику заново.", show_alert=True)
+                return True
+            if act in ("compose", "format"):
+                await q.answer("Готую текст…")
+                try:
+                    await q.edit_message_reply_markup(None)
+                except BadRequest:
+                    pass
+                await self.make_draft(ctx, chat_id, uid, d["kind"], d["source"], compose=(act == "compose"))
+                return True
+            if act == "redo":
+                await q.answer("Роблю інший варіант…")
+                await self.make_draft(ctx, chat_id, uid, d["kind"], d["source"],
+                                      compose=bool(C.KINDS[d["kind"]].compose and not d["source"].strip().endswith(".")))
+                return True
+            if act == "src":
+                await q.answer()
+                await ctx.bot.send_message(chat_id, "📋 Ваш вихідний текст:\n\n" + d["source"][:3500])
+                return True
+            if act == "sample":
+                ok = self.db.add_sample(d["kind"], d["text"], uid)
+                await q.answer("✅ Додано у зразки стилю" if ok else "Такий зразок уже є", show_alert=not ok)
+                return True
+            if act == "prompt":
+                await q.answer()
+                prompt = d["prompt"]
+                if not prompt:
+                    wait = await ctx.bot.send_message(chat_id, "⏳ Складаю промт…")
+                    prompt, _ = await self.build_prompt(uid, d["kind"], d["text"])
+                    self.db.update_draft(did, prompt=prompt)
+                    await self._del(ctx, chat_id, wait.message_id)
+                rows = [[("✏️ Змінити промт", f"p:editp:{did}")]]
+                if self.oai_ready():
+                    rows.insert(0, [("🖌 Згенерувати картинку", f"p:gen:{did}")])
+                    rows.append([("🔁 Інший промт", f"p:newp:{did}")])
+                await ctx.bot.send_message(chat_id, "🎨 Промт для генератора зображень:\n\n" + prompt,
+                                           reply_markup=kb(rows))
+                return True
+            if act == "newp":
+                await q.answer("Складаю інший промт…")
+                prompt, _ = await self.build_prompt(uid, d["kind"], d["text"])
+                self.db.update_draft(did, prompt=prompt)
+                rows = [[("🖌 Згенерувати картинку", f"p:gen:{did}")], [("✏️ Змінити промт", f"p:editp:{did}")]]
+                await ctx.bot.send_message(chat_id, "🎨 Промт:\n\n" + prompt, reply_markup=kb(rows))
+                return True
+            if act == "editp":
+                self.db.set_state(uid, f"editprompt:{did}")
+                await q.answer()
+                await ctx.bot.send_message(chat_id, "✏️ Надішліть свій промт (англійською — так краще). /cancel — скасувати.")
+                return True
+            if act == "gen":
+                if not self.oai_ready():
+                    await q.answer("Потрібен ключ OpenAI: меню → Адміністрування → OpenAI", show_alert=True)
+                    return True
+                await q.answer("Малюю…")
+                await self.do_generate(ctx, chat_id, uid, did)
+                return True
+            if act == "short":
+                await q.answer("Скорочую…")
+                text = d["text"]
+                if self.oai_ready():
+                    try:
+                        sys_, user = C.shorten_messages(text, 25)
+                        text = C.strip_markup(await self.oai().chat(sys_, user, max_tokens=400))
+                        self.db.add_usage(uid, "text")
+                    except O.OpenAIError as e:
+                        await ctx.bot.send_message(chat_id, f"⚠️ {esc(e)} Скоротив простіше.", parse_mode=ParseMode.HTML)
+                        text = C.shorten_local(text, 25)
+                else:
+                    text = C.shorten_local(text, 25)
+                self.db.update_draft(did, text=text)
+                await self.send_draft(ctx, chat_id, uid, did, note="✂️ Скорочений варіант.")
+                return True
+            if act == "card":
+                await q.answer("Роблю листівку…")
+                short = d["text"]
+                if R.count_words(short) > 40:
+                    short = " ".join(short.split()[:40])
+                await self.send_card(ctx, chat_id, uid, short, self.post_cfg(d["kind"]).get("title") or None)
+                return True
+            if act == "photo":
+                self.db.set_state(uid, "dayphoto", {"draft": did})
+                await q.answer()
+                await ctx.bot.send_message(
+                    chat_id, f"📅 Надішліть фото на сьогодні — я збережу його як "
+                             f"{C.photo_target(dt.date.today()).name} у папці фото. /cancel — скасувати.")
+                return True
+
+        return False

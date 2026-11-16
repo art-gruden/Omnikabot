@@ -1,0 +1,47 @@
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Встановити залежності
+        run: pip install -r requirements-dev.txt
+
+      - name: Перевірити синтаксис deploy.sh
+        run: bash -n deploy.sh
+
+      - name: Рендер листівок
+        run: python3 tests/test_render.py
+
+      - name: Бот (імітація Telegram Bot API)
+        run: python3 tests/test_bot.py
+
+      - name: Рубрики й ChatGPT (імітація Telegram + OpenAI)
+        run: python3 tests/test_posts.py
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Зібрати образ
+        run: docker build -t energy-card-bot:ci .
+      - name: Перевірити, що бот стартує без токена з поясненням
+        run: |
+          out=$(docker run --rm energy-card-bot:ci 2>&1 || true)
+          echo "$out"
+          echo "$out" | grep -q "BOT_TOKEN"

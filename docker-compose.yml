@@ -1,0 +1,25 @@
+services:
+  bot:
+    build: .
+    image: docker.io/artgruden/energy-card-bot:1.1.0
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Europe/Berlin}      # від нього залежить, яке фото дня вважається сьогоднішнім
+    volumes:
+      - bot-data:/data          # SQLite з налаштуваннями + додані шаблони
+      # Фото на кожен день: файли 1611.jpg, 1711.jpg… Покладіть їх у ./photos поруч із docker-compose.yml.
+      - ./photos:/data/photos
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+volumes:
+  bot-data:
