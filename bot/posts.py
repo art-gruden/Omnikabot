@@ -3,7 +3,7 @@
 Підмішується до CardBot (bot/main.py): екрани меню, стани введення, обробники кнопок.
 Префікси callback_data:
     pm:  — меню рубрик і налаштування рубрики
-    p:   — дії над чернеткою поста
+    p:   — дії над чернеткою поста (зокрема промт картинки: p:prompt, p:newp, p:copy, p:editp, p:gen)
     o:   — налаштування OpenAI
     sm:  — зразки постів (аналіз стилю)
 """
@@ -15,6 +15,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from telegram.error import BadRequest
 from textcard import render as R
 
 from . import content as C
+from . import image_prompts as IP
 from . import openai_api as O
 
 log = logging.getLogger("textcard-bot.posts")
@@ -115,6 +117,7 @@ class PostsMixin:
         return out.strip(), True
 
     async def build_prompt(self, uid: int, kind_id: str, text: str, extra: str = "") -> tuple[str, bool]:
+        """Запасний шлях: промт складає GPT (або локальний шаблон). Працює, якщо бібліотека промтів недоступна."""
         kind = C.KINDS[kind_id]
         if not self.oai_ready():
             return C.local_image_prompt(kind, text), False
@@ -128,6 +131,82 @@ class PostsMixin:
         if "no text" not in p.lower():
             p += " No text, no letters, no captions, no watermark."
         return p.strip(), True
+
+    async def image_theme(self, uid: int, kind_id: str, text: str) -> tuple[str, str]:
+        """(тема, символ) англійською для готового промту. Без ключа OpenAI або при помилці — порожні."""
+        if not self.oai_ready() or not text.strip():
+            return "", ""
+        try:
+            reply = await self.oai().chat(*C.image_theme_messages(C.KINDS[kind_id], text), max_tokens=300)
+        except O.OpenAIError as e:
+            log.info("тему картинки через GPT не визначено: %s", e)
+            return "", ""
+        self.db.add_usage(uid, "text")
+        return IP.parse_theme_reply(reply)
+
+    async def ensure_prompt(self, uid: int, did: str, *, renew: bool = False) -> str:
+        """Промт картинки для чернетки. Бере готовий промт рубрики з prompts/*.json і підставляє дату,
+        сезон і тему посту. renew=True — наступний варіант. Обраний промт зберігається в чернетці."""
+        d = self.db.draft(did)
+        if d["prompt"] and not renew:
+            return d["prompt"]
+        extra = json.loads(d["extra"] or "{}")
+        meta = extra.get("ip") or {}
+        kind_id = d["kind"]
+        try:
+            IP.load_library()
+            if "theme" not in meta:                       # тему визначаємо один раз на чернетку
+                meta["theme"], meta["symbol"] = await self.image_theme(uid, kind_id, d["text"] or d["source"])
+            jubilee = kind_id == "birthday" and re.search(r"ювіле", f"{d['source']} {d['text']}", re.I)
+            ip = IP.build(kind_id, dt.date.today(), theme=meta["theme"], symbol=meta["symbol"],
+                          last_used=self.db.prompt_last_used(kind_id), recent=self.db.prompt_recent(kind_id),
+                          exclude=(meta["id"],) if renew and meta.get("id") else (),
+                          variant=3 if jubilee and not renew else None, allow_explicit=renew)
+        except IP.PromptError as e:
+            log.warning("готові промти недоступні (%s) — складаю промт по-старому", e)
+            prompt, _ = await self.build_prompt(uid, kind_id, d["text"])
+            fresh = json.loads(self.db.draft(did)["extra"] or "{}")
+            fresh.pop("ip", None)
+            self.db.update_draft(did, prompt=prompt, extra=fresh)
+            return prompt
+        self.db.add_prompt_log(kind_id, ip.prompt_id, ip.anchor, uid)
+        fresh = json.loads(self.db.draft(did)["extra"] or "{}")     # за час запиту до GPT чернетку могли змінити
+        fresh["ip"] = {"id": ip.prompt_id, "title": ip.title, "theme": meta["theme"], "symbol": meta["symbol"]}
+        self.db.update_draft(did, prompt=ip.prompt, extra=fresh)
+        return ip.prompt
+
+    def chatgpt_url_limit(self) -> int:
+        return int(self.db.kv_get("chatgpt_url_limit", 0) or IP.MAX_BUTTON_URL)
+
+    def prompt_kb(self, did: str, url: str | None):
+        from .main import kb
+        rows = [([("🌐 Відкрити в ChatGPT", url)] if url else []) + [("📋 Скопіювати промт", f"p:copy:{did}")]]
+        if self.oai_ready():
+            rows.append([("🖌 Згенерувати картинку", f"p:gen:{did}")])
+        rows.append([("🔁 Інший промт", f"p:newp:{did}"), ("✏️ Змінити промт", f"p:editp:{did}")])
+        return kb(rows)
+
+    async def send_prompt(self, ctx, chat_id: int, did: str, head: str = "🎨 Промт для генератора зображень"):
+        """Повідомлення з промтом і кнопками. Якщо Telegram не приймає довге посилання —
+        повторює з коротшим, потім без кнопки-посилання; знайдений поріг запам'ятовує."""
+        d = self.db.draft(did)
+        prompt = d["prompt"] or ""
+        title = (json.loads(d["extra"] or "{}").get("ip") or {}).get("title", "")
+        limit = self.chatgpt_url_limit()
+        for lim in dict.fromkeys((limit, min(limit, IP.SAFE_BUTTON_URL), 0)):
+            url, shortened = IP.button_url(prompt, lim) if lim else (None, True)
+            note = ("" if url and not shortened else
+                    "\n\nℹ️ У посиланні промт трохи скорочено; повний текст дає «Скопіювати промт»." if url else
+                    "\n\nℹ️ Промт задовгий для посилання — скористайтеся кнопкою «Скопіювати промт».")
+            text = head + (f"\n{title}" if title else "") + "\n\n" + prompt + note
+            try:
+                return await ctx.bot.send_message(chat_id, text[:C.TG_MESSAGE], reply_markup=self.prompt_kb(did, url))
+            except BadRequest as e:
+                if not url:
+                    raise
+                log.info("Telegram не прийняв посилання на ChatGPT (%d символів): %s", len(url), e)
+                if lim > IP.SAFE_BUTTON_URL:
+                    self.db.kv_set("chatgpt_url_limit", IP.SAFE_BUTTON_URL)
 
     async def gen_image(self, uid: int, prompt: str, width: int, height: int) -> bytes:
         cfg = self.oai_cfg()
@@ -396,10 +475,8 @@ class PostsMixin:
         if not d:
             return await ctx.bot.send_message(chat_id, "Чернетку не знайдено.")
         k = C.KINDS[d["kind"]]
-        prompt = d["prompt"]
-        if not prompt:
-            prompt, _ = await self.build_prompt(uid, d["kind"], d["text"])
-            self.db.update_draft(did, prompt=prompt)
+        prompt = await self.ensure_prompt(uid, did)
+        d = self.db.draft(did)                       # ensure_prompt міг оновити чернетку
         s = self.st(uid)
         try:
             w, h = R.parse_size(s["size"], "1280x782")
@@ -498,11 +575,17 @@ class PostsMixin:
 
         if state and state.startswith("editprompt:"):
             did = state.split(":", 1)[1]
-            self.db.update_draft(did, prompt=text.strip()[:3000])
-            self.db.set_state(uid, None)
             d = self.db.draft(did)
-            await msg.reply_text("✅ Промт збережено.",
-                                 reply_markup=kb([[("🖌 Згенерувати картинку", f"p:gen:{did}")]] if self.oai_ready() else []))
+            if not d:
+                self.db.set_state(uid, None)
+                await msg.reply_text("Чернетка застаріла — почніть рубрику заново.")
+                return True
+            extra = json.loads(d["extra"] or "{}")
+            if "ip" in extra:                         # свій промт: назву готового більше не показуємо
+                extra["ip"] = {k: v for k, v in extra["ip"].items() if k in ("id", "theme", "symbol")}
+            self.db.update_draft(did, prompt=text.strip()[:3000], extra=extra)
+            self.db.set_state(uid, None)
+            await self.send_prompt(ctx, chat_id, did, head="✅ Промт збережено.")
             return True
 
         if state and state.startswith("kindtags:"):
@@ -760,25 +843,26 @@ class PostsMixin:
                 return True
             if act == "prompt":
                 await q.answer()
-                prompt = d["prompt"]
-                if not prompt:
-                    wait = await ctx.bot.send_message(chat_id, "⏳ Складаю промт…")
-                    prompt, _ = await self.build_prompt(uid, d["kind"], d["text"])
-                    self.db.update_draft(did, prompt=prompt)
-                    await self._del(ctx, chat_id, wait.message_id)
-                rows = [[("✏️ Змінити промт", f"p:editp:{did}")]]
-                if self.oai_ready():
-                    rows.insert(0, [("🖌 Згенерувати картинку", f"p:gen:{did}")])
-                    rows.append([("🔁 Інший промт", f"p:newp:{did}")])
-                await ctx.bot.send_message(chat_id, "🎨 Промт для генератора зображень:\n\n" + prompt,
-                                           reply_markup=kb(rows))
+                if not d["prompt"]:
+                    wait = await ctx.bot.send_message(chat_id, "⏳ Підбираю промт…")
+                    try:
+                        await self.ensure_prompt(uid, did)
+                    finally:
+                        await self._del(ctx, chat_id, wait.message_id)
+                await self.send_prompt(ctx, chat_id, did)
                 return True
             if act == "newp":
-                await q.answer("Складаю інший промт…")
-                prompt, _ = await self.build_prompt(uid, d["kind"], d["text"])
-                self.db.update_draft(did, prompt=prompt)
-                rows = [[("🖌 Згенерувати картинку", f"p:gen:{did}")], [("✏️ Змінити промт", f"p:editp:{did}")]]
-                await ctx.bot.send_message(chat_id, "🎨 Промт:\n\n" + prompt, reply_markup=kb(rows))
+                await q.answer("Підбираю інший промт…")
+                await self.ensure_prompt(uid, did, renew=True)
+                await self.send_prompt(ctx, chat_id, did)
+                return True
+            if act == "copy":
+                # кнопка Telegram «скопіювати текст» вміщує лише 256 символів, а промт довший,
+                # тому надсилаємо його моноширинним блоком: натискання на текст копіює його цілком
+                await q.answer("Натисніть на текст промту — він скопіюється")
+                prompt = await self.ensure_prompt(uid, did)
+                await ctx.bot.send_message(chat_id, "📋 Натисніть на текст, і він скопіюється в буфер:\n\n"
+                                                    f"<code>{esc(prompt)}</code>", parse_mode=ParseMode.HTML)
                 return True
             if act == "editp":
                 self.db.set_state(uid, f"editprompt:{did}")

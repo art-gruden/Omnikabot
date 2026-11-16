@@ -37,6 +37,7 @@ class FakeOpenAI:
         self.text_reply = "Доброго ранку, друзі! ☀️\n\nНехай цей день буде світлим.\n\n💛 Усмішки вам і тепла."
         self.prompt_reply = ("Soft watercolor sunrise over calm hills, warm golden light, gentle pink and amber "
                              "gradients, airy mist, serene low-detail center, horizontal composition.")
+        self.theme_reply = "THEME: gratitude and quiet morning light\nSYMBOL: a single white feather"
         self.style_reply = "Тон теплий і сердечний, звертання «друзі», 3 абзаци, емодзі на початку абзаців."
         self.lock = threading.Lock()
         self.app = self._app()
@@ -61,6 +62,8 @@ class FakeOpenAI:
             sys_prompt = body["messages"][0]["content"]
             if "опиши стиль" in sys_prompt.lower() or "аналізуєш стиль" in sys_prompt.lower():
                 out = self.style_reply
+            elif "THEME:" in sys_prompt and "SYMBOL:" in sys_prompt:
+                out = self.theme_reply
             elif "промт" in sys_prompt.lower() and "зображен" in sys_prompt.lower():
                 out = self.prompt_reply
             else:

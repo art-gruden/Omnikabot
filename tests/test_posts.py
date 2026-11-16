@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import html
 import io
+import json
 import os
 import sys
 import tempfile
 import time
 import traceback
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -33,6 +36,7 @@ from PIL import Image  # noqa: E402
 from fake_openai import KEY as OAI_KEY, FakeOpenAI  # noqa: E402
 from fake_tg import FakeTelegram  # noqa: E402
 from bot import main as M  # noqa: E402
+from bot import image_prompts as IP  # noqa: E402
 
 TG_PORT, OAI_PORT = 18771, 18772
 A, B = 4111, 4222
@@ -105,6 +109,25 @@ def btn(msg, part):
     raise AssertionError(f"нема кнопки «{part}»: {[b['text'] for b in buttons(msg)]}")
 
 
+def url_btn(msg):
+    """Адреса кнопки-посилання «Відкрити в ChatGPT» або None."""
+    return next((b["url"] for b in buttons(msg) if b.get("url")), None)
+
+
+def url_prompt(msg):
+    return parse_qs(urlparse(url_btn(msg)).query)["q"][0]
+
+
+def draft_of(cb, msg):
+    did = btn(msg, "Скопіювати промт").split(":")[2]
+    d = cb.db.draft(did)
+    return d, (json.loads(d["extra"] or "{}").get("ip") or {})
+
+
+def cat_of(prompt_id):
+    return IP.load_library()[prompt_id]["category_id"]
+
+
 async def press(uid, msg, data, quiet=0.5):
     m = fake.mark()
     fake.press(uid, msg, data)
@@ -148,6 +171,18 @@ async def scenario(cb):
     if post:
         txt = post[0]["params"]["text"]
         check("\n\n" in txt and txt[0] in "☀️🌿💛🙏✨", f"абзаци й емодзі: {txt[:40]!r}")
+    if post:
+        pmsg = cur(post[0])
+        check("Згенерувати картинку" not in str(buttons(pmsg)), "без ключа кнопки генерації немає")
+        m = fake.mark()
+        fake.press(A, pmsg, btn(pmsg, "Промт картинки"))
+        pm0 = cur(await wait(m, is_("sendMessage", A, "Промт для генератора")))
+        d0, ip0 = draft_of(cb, pm0)
+        check(cat_of(ip0["id"]) in IP.KIND_CATEGORIES["omnika"], f"без ключа: готовий промт рубрики ({ip0['id']})")
+        check("{{" not in pm0["text"] and IP.date_uk(dt.date.today()) in pm0["text"], "поля промту заповнено, дата сьогоднішня")
+        check(url_btn(pm0) and url_btn(pm0).startswith("https://chatgpt.com/?q=") and url_prompt(pm0) == d0["prompt"],
+              "кнопка «Відкрити в ChatGPT» несе той самий промт")
+        check("Згенерувати" not in str(buttons(pm0)) and "Інший промт" in str(buttons(pm0)), "кнопки під промтом без ключа")
     check(len(oai.calls) == 0, "до OpenAI не ходили")
 
     print("3. Адмін вводить ключ OpenAI; повідомлення з ключем видаляється")
@@ -203,20 +238,83 @@ async def scenario(cb):
     draft_msg = cur(post[0]) if post else None
     check(draft_msg and "Згенерувати картинку" in str(buttons(draft_msg)), "кнопки чернетки")
 
-    print("6. Промт для картинки й генерація")
+    print("6. Готовий промт рубрики: тема від GPT, кнопки ChatGPT і копіювання")
     n0 = oai.mark()
     m = fake.mark()
     fake.press(A, draft_msg, btn(draft_msg, "Промт картинки"))
     pm = cur(await wait(m, is_("sendMessage", A, "Промт для генератора")))
-    check("watercolor sunrise" in pm["text"], "промт від GPT показано")
+    d, ip = draft_of(cb, pm)
+    check(cat_of(ip["id"]) in IP.KIND_CATEGORIES["omnika"], f"промт із категорій рубрики «Омніка» ({ip['id']})")
+    check(ip["title"] in pm["text"], "у повідомленні назва категорії й варіанта")
+    check("gratitude and quiet morning light" in d["prompt"], "тему посту від GPT підставлено в промт")
+    themed = [c for c in oai.since(n0) if c["what"] == "chat" and "THEME:" in c["body"]["messages"][0]["content"]]
+    check(len(themed) == 1 and "Нехай цей день" in themed[0]["body"]["messages"][1]["content"],
+          "один запит теми до GPT, у ньому текст посту")
+    check("{{" not in d["prompt"] and IP.date_uk(dt.date.today()) in d["prompt"], "поля заповнено, дата сьогоднішня")
+    check("watercolor sunrise" not in pm["text"], "промт більше не складається з нуля")
+    check(url_btn(pm).startswith("https://chatgpt.com/?q=") and url_prompt(pm) == d["prompt"],
+          "кнопка «Відкрити в ChatGPT»: посилання з повним промтом")
+    check([b["text"] for b in buttons(pm)][:2] == ["🌐 Відкрити в ChatGPT", "📋 Скопіювати промт"], "дві кнопки в першому рядку")
+
+    m = fake.mark()
+    fake.press(A, pm, btn(pm, "Скопіювати промт"))
+    cp = await wait(m, is_("sendMessage", A, "скопіюється"))
+    body = cp["params"]["text"]
+    check(cp["params"].get("parse_mode") == "HTML" and "<code>" in body, "промт надіслано моноширинним блоком")
+    check(html.unescape(body.split("<code>", 1)[1].rsplit("</code>", 1)[0]) == d["prompt"], "у блоці — повний промт без змін")
+
+    n1 = oai.mark()
+    m = fake.mark()
+    fake.press(A, pm, btn(pm, "Інший промт"))
+    pm2 = cur(await wait(m, is_("sendMessage", A, "Промт для генератора")))
+    d2, ip2 = draft_of(cb, pm2)
+    check(ip2["id"] != ip["id"] and cat_of(ip2["id"]) in IP.KIND_CATEGORIES["omnika"], f"інший промт: {ip['id']} → {ip2['id']}")
+    check(not [c for c in oai.since(n1) if c["what"] == "chat"], "тему вдруге в GPT не питаємо")
+    check(IP.VISUAL_TAGS[ip["id"]] in d2["prompt"], "попередній сюжет передано як «уникати»")
+    seen = {ip["id"], ip2["id"]}
+    for _ in range(4):
+        m = fake.mark()
+        fake.press(A, pm2, btn(pm2, "Інший промт"))
+        pm2 = cur(await wait(m, is_("sendMessage", A, "Промт для генератора")))
+        seen.add(draft_of(cb, pm2)[1]["id"])
+    check(len(seen) == 6, f"шість натискань — шість різних промтів ({len(seen)})")
+    d, ip = draft_of(cb, pm2)
+    pm = pm2
+
     m = fake.mark()
     fake.press(A, pm, btn(pm, "Згенерувати картинку"))
     c = await wait(m, is_("sendPhoto", A), timeout=30)
     check(img_size(c) == (1536, 1024), f"картинка до посту {img_size(c)}")
     icall = oai.of("image")[-1]
     check(icall["body"]["model"] == "gpt-image-1.5" and icall["body"]["size"] == "1536x1024", "параметри запиту зображення")
+    check(icall["body"]["prompt"] == d["prompt"], "у генератор пішов той самий готовий промт")
     check("no text" in icall["body"]["prompt"].lower(), "промт забороняє текст на картинці")
     check(cb.db.usage_count(A, "image") == 1, "генерацію враховано в ліміті")
+
+    print("6b. Telegram не приймає довге посилання: коротше, потім без кнопки-посилання")
+    fake.max_button_url = IP.SAFE_BUTTON_URL
+    m = fake.mark()
+    fake.press(A, pm, btn(pm, "Інший промт"))
+    pm3 = cur(await wait(m, is_("sendMessage", A, "Промт для генератора")))
+    d3, _ = draft_of(cb, pm3)
+    check(len(fake.rejected) == 1, "перше, повне посилання відхилено")
+    check(url_btn(pm3) and len(url_btn(pm3)) <= IP.SAFE_BUTTON_URL and "трохи скорочено" in pm3["text"],
+          f"надіслано коротше посилання ({len(url_btn(pm3) or '')})")
+    check("Produce a single 16:9 landscape image" in url_prompt(pm3) and url_prompt(pm3) != d3["prompt"],
+          "у короткому посиланні лишилась суть промту")
+    check(cb.chatgpt_url_limit() == IP.SAFE_BUTTON_URL, "поріг довжини запам'ятовано")
+    m = fake.mark()
+    fake.press(A, pm3, btn(pm3, "Скопіювати промт"))
+    cp = await wait(m, is_("sendMessage", A, "скопіюється"))
+    check(html.unescape(cp["params"]["text"].split("<code>", 1)[1].rsplit("</code>", 1)[0]) == d3["prompt"],
+          "копіювання й далі дає повний промт")
+    fake.max_button_url = 10
+    m = fake.mark()
+    fake.press(A, pm3, btn(pm3, "Інший промт"))
+    pm4 = cur(await wait(m, is_("sendMessage", A, "Промт для генератора")))
+    check(url_btn(pm4) is None and "Скопіювати промт" in str(buttons(pm4)) and "задовгий для посилання" in pm4["text"],
+          "без посилання лишається копіювання")
+    fake.max_button_url = None
 
     print("7. Свій промт і повторна генерація")
     m = fake.mark()
@@ -225,6 +323,8 @@ async def scenario(cb):
     m = fake.mark()
     fake.send_text(A, "my own calm prompt without text")
     ok = cur(await wait(m, is_("sendMessage", A, "Промт збережено")))
+    check(url_prompt(ok) == "my own calm prompt without text" and "Скопіювати промт" in str(buttons(ok)),
+          "свій промт теж відкривається в ChatGPT і копіюється")
     n0 = oai.mark()
     m = fake.mark()
     fake.press(A, ok, btn(ok, "Згенерувати"))
@@ -251,6 +351,11 @@ async def scenario(cb):
     post = [c for c in calls if c["method"] == "sendMessage" and "Нехай цей день" in c["params"].get("text", "")]
     draft_msg = cur(post[0]) if post else None
     check(draft_msg and "Фото дня" in str(buttons(draft_msg)), "кнопка «Фото дня»")
+    m = fake.mark()
+    fake.press(A, draft_msg, btn(draft_msg, "Промт картинки"))
+    upm = cur(await wait(m, is_("sendMessage", A, "Промт для генератора")))
+    _, uip = draft_of(cb, upm)
+    check(cat_of(uip["id"]) in ("heart", "intention"), f"«Єдність сердець»: категорії heart / intention ({uip['id']})")
 
     print("9. Завантаження фото дня через бота")
     m = fake.mark()
@@ -294,6 +399,7 @@ async def scenario(cb):
     c = await wait(m, is_("sendPhoto", A), timeout=40)
     check(img_size(c) == (1280, 782), f"листівка на новому фоні {img_size(c)}")
     check(oai.of("image")[-1]["body"]["size"] == "1536x1024", "розмір під формат листівки")
+    check("birthday greeting background" in oai.of("image")[-1]["body"]["prompt"], "ДН: готовий промт дня народження")
     gen = [t for t in cb.store.all() if t.config.get("generated")]
     check(len(cb.store.all()) == tpl_before + 1 and gen, "фон збережено як шаблон")
     if gen:
@@ -341,6 +447,29 @@ async def scenario(cb):
     fake.press(A, plain, "r:bg")
     c = await wait(m, is_("sendPhoto", A), timeout=40)
     check(img_size(c) == (1280, 782), "листівка перемальована на згенерованому фоні")
+    check("affirmation" in oai.of("image")[-1]["body"]["prompt"].lower(), "фон листівки: промт категорії affirmation")
+
+    print("13b. Ювілей і запасний шлях без бібліотеки промтів")
+    m = fake.mark()
+    fake.send_text(A, "/birthday Вітаю з ювілеєм, дорога Олено! Світла тобі й радості.")
+    ask = cur(await wait(m, is_("sendMessage", A, "Що зробити")))
+    m = fake.mark()
+    fake.press(A, ask, btn(ask, "Оформити мій текст"))
+    c = await wait(m, is_("sendPhoto", A), timeout=30)
+    m = fake.mark()
+    fake.press(A, c["result"], btn(c["result"], "Промт картинки"))
+    jp = cur(await wait(m, is_("sendMessage", A, "Промт для генератора")))
+    check(draft_of(cb, jp)[1]["id"] == "birthday_3", "слово «ювілей» у тексті → ювілейний фон")
+    saved_dir, IP.PROMPTS_DIR = IP.PROMPTS_DIR, DATA / "no-such-prompts"
+    m = fake.mark()
+    fake.send_text(A, "/omnika " + OMNIKA_TEXT)
+    calls = await settle(m)
+    post = [c for c in calls if is_("sendMessage", A)(c) and "Нехай цей день" in c["params"].get("text", "")]
+    m = fake.mark()
+    fake.press(A, cur(post[0]), btn(cur(post[0]), "Промт картинки"))
+    fb = cur(await wait(m, is_("sendMessage", A, "Промт для генератора")))
+    check("watercolor sunrise" in fb["text"] and url_btn(fb), "без файлів промтів бот складає промт через GPT, кнопки на місці")
+    IP.PROMPTS_DIR = saved_dir
 
     print("14. Зразки стилю через меню")
     mn = await menu(A)

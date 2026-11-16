@@ -25,6 +25,8 @@ class FakeTelegram:
         self._mid = itertools.count(1000)
         self._fid = itertools.count(1)
         self.lock = threading.Lock()
+        self.max_button_url: int | None = None   # якщо задано — відхиляємо довші посилання в кнопках
+        self.rejected: list[dict] = []           # відхилені виклики
         self.app = self._make_app()
         self.server = None
 
@@ -54,6 +56,14 @@ class FakeTelegram:
                         pass
             if method == "getUpdates":
                 return JSONResponse({"ok": True, "result": await self._get_updates(params)})
+            if self.max_button_url is not None:
+                urls = [b.get("url", "") for row in (params.get("reply_markup") or {}).get("inline_keyboard", [])
+                        for b in row] if isinstance(params.get("reply_markup"), dict) else []
+                if any(len(u) > self.max_button_url for u in urls):
+                    with self.lock:
+                        self.rejected.append({"method": method, "params": params})
+                    return JSONResponse({"ok": False, "error_code": 400,
+                                         "description": "Bad Request: BUTTON_URL_INVALID"}, 400)
             try:
                 result = self._handle(method, params, files)
             except KeyError as e:

@@ -78,7 +78,8 @@ HELP = (
     "Надішліть текст (10–20 слів) — я зроблю з нього листівку.\n\n"
     "📝 <b>Рубрики</b> (/post): привітання з днем народження, ранкове завантаження, "
     "ранкове привітання «Омніка», налаштування на день «Єдність сердець». "
-    "Бот оформлює текст у стилі ваших попередніх постів, складає промт і малює картинку через ChatGPT.\n\n"
+    "Бот оформлює текст у стилі ваших попередніх постів, підбирає готовий промт картинки під рубрику й дату "
+    "та малює її через ChatGPT. Під промтом є кнопки «Відкрити в ChatGPT» і «Скопіювати промт».\n\n"
     "• <code>*слово*</code> — виділити кольором\n"
     "• перший рядок, що починається з <code>#</code>, — заголовок лише для цієї листівки "
     "(<code>#</code> без тексту — без заголовка)\n"
@@ -98,7 +99,10 @@ def esc(s) -> str:
 
 
 def kb(rows) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[Btn(t, callback_data=d) for t, d in row] for row in rows if row])
+    """Рядки з пар (текст, дані). Дані, що починаються з http(s)://, стають кнопкою-посиланням."""
+    def one(t: str, d: str) -> Btn:
+        return Btn(t, url=d) if d.startswith(("https://", "http://")) else Btn(t, callback_data=d)
+    return InlineKeyboardMarkup([[one(t, d) for t, d in row] for row in rows if row])
 
 
 class CardBot(PostsMixin):

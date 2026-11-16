@@ -16,6 +16,7 @@ COPY textcard textcard
 COPY bot bot
 COPY fonts fonts
 COPY templates templates
+COPY prompts prompts
 
 RUN useradd --system --uid 10001 --no-create-home cardbot \
  && mkdir -p /data/photos && chown -R 10001:10001 /data

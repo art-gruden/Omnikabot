@@ -1,0 +1,46 @@
+{
+  "version": "1.0",
+  "language": "uk",
+  "count": 3,
+  "types": 1,
+  "note": "Доповнення до morning-image-prompts-24.json: у 24 промтах немає дня народження. Зроблено з розділу 3.5 chatgpt-image-prompts.md у тому самому форматі.",
+  "placeholders": [
+    "DATE_ISO",
+    "SEASON",
+    "SEASON_DETAILS",
+    "SEASON_PALETTE",
+    "SEASONAL_BOTANICALS",
+    "DAY_THEME",
+    "CREATIVE_ANCHOR",
+    "RECENT_VISUALS"
+  ],
+  "prompts": [
+    {
+      "id": "birthday_1",
+      "category_id": "birthday",
+      "category": "День народження",
+      "bot_command": "/bd",
+      "variant": 1,
+      "name": "Квіти й свічка (жіноче)",
+      "prompt": "Create an elegant birthday greeting background: a generous bouquet of peonies and roses mixed with {{SEASONAL_BOTANICALS}}, a small burning candle and a gift box tied with a silk ribbon on a wooden table. Soft pink, peach and golden palette with a touch of {{SEASON_PALETTE}}, warm glow, gentle bokeh lights, delicate and festive; add {{CREATIVE_ANCHOR}} as a small personal detail. For a Ukrainian Telegram birthday greeting on {{DATE_ISO}}; its mood is {{DAY_THEME}}. Produce a single 16:9 landscape image, intended for 1280×720. Keep the central 50% calm and low in detail for a name and a short greeting added later in code, NOT by the image model. No text, numbers, letters, captions, lettering on objects, watermark, logos, people, recognizable faces, or copyrighted characters. No garish neon, busy edge clutter, or visual noise. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "birthday_2",
+      "category_id": "birthday",
+      "category": "День народження",
+      "bot_command": "/bd",
+      "variant": 2,
+      "name": "Тепле світло (чоловіче / нейтральне)",
+      "prompt": "Create a warm, dignified birthday greeting background: a candle-lit cake on a wooden table beside a window with a {{SEASON}} landscape showing {{SEASON_DETAILS}}, a neatly wrapped gift and {{SEASONAL_BOTANICALS}}. Deep blue, green and golden palette, calm soft light, festive but restrained; add {{CREATIVE_ANCHOR}} as a small personal detail. For a Ukrainian Telegram birthday greeting on {{DATE_ISO}}; its mood is {{DAY_THEME}}. Produce a single 16:9 landscape image, intended for 1280×720. Keep the central 50% calm and low in detail for a name and a short greeting added later in code, NOT by the image model. No text, numbers, letters, captions, lettering on objects, watermark, logos, people, recognizable faces, or copyrighted characters. No garish neon, busy edge clutter, or visual noise. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "birthday_3",
+      "category_id": "birthday",
+      "category": "День народження",
+      "bot_command": "/bd",
+      "variant": 3,
+      "name": "Ювілей",
+      "prompt": "Create a festive jubilee background: golden ribbons, a confetti of small golden stars, a few elegant balloons at the edges, {{SEASONAL_BOTANICALS}} and warm candlelight on a soft pastel backdrop tinted with {{SEASON_PALETTE}}. Joyful, elegant and luminous, with a clean glowing centre for a number added later in code. For a Ukrainian Telegram birthday greeting on {{DATE_ISO}}; its mood is {{DAY_THEME}}. Produce a single 16:9 landscape image, intended for 1280×720. Keep the central 50% calm and low in detail for a name and a short greeting added later in code, NOT by the image model. No text, numbers, letters, captions, lettering on objects, watermark, logos, people, recognizable faces, or copyrighted characters. No garish neon, busy edge clutter, or visual noise. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    }
+  ]
+}

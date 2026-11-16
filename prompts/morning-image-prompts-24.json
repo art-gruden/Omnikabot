@@ -1,0 +1,240 @@
+{
+  "version": "1.0",
+  "language": "uk",
+  "count": 24,
+  "types": 8,
+  "placeholders": [
+    "DATE_ISO",
+    "DATE_UK",
+    "WEEKDAY_UK",
+    "SEASON",
+    "SEASON_DETAILS",
+    "SEASON_PALETTE",
+    "SEASONAL_BOTANICALS",
+    "SEASONAL_FRUIT",
+    "DAY_THEME",
+    "THEME_SYMBOL",
+    "CREATIVE_ANCHOR",
+    "RECENT_VISUALS",
+    "EVENT_NAME",
+    "EVENT_SYMBOL"
+  ],
+  "prompts": [
+    {
+      "id": "calendar_1",
+      "category_id": "calendar",
+      "category": "Календарна картка з датою",
+      "bot_command": "/day /morning",
+      "variant": 1,
+      "name": "Панорама світанку",
+      "prompt": "Create a cinematic collectible calendar illustration of a {{SEASON}} sunrise seen from a secluded overlook. A winding river enters a mirror-still mountain lake; {{SEASON_DETAILS}} appear along the banks, and delicate golden mist catches the first light. Use {{SEASON_PALETTE}} and an unusually asymmetric wide-angle composition. Add one small, believable {{CREATIVE_ANCHOR}} near the shoreline; no recycled postcard composition. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "calendar_2",
+      "category_id": "calendar",
+      "category": "Календарна картка з датою",
+      "bot_command": "/day /morning",
+      "variant": 2,
+      "name": "Ботанічний натюрморт",
+      "prompt": "Create an elegant seasonal calendar still life: freshly gathered {{SEASONAL_BOTANICALS}} in an artisan ceramic vase next to a small handmade object {{CREATIVE_ANCHOR}}. Beyond an old wooden window, a believable {{SEASON}} morning unfolds with {{SEASON_DETAILS}}. Side lighting, fine textile detail, rich harmonious {{SEASON_PALETTE}}, gently painterly fine-art photography, distinctive foreground framing. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "calendar_3",
+      "category_id": "calendar",
+      "category": "Календарна картка з датою",
+      "bot_command": "/day /morning",
+      "variant": 3,
+      "name": "Казкове джерело",
+      "prompt": "Create a magical-realism but natural-looking seasonal scene: a tiny spring or cascade flowing through smooth stones toward a luminous clear pool, with {{SEASONAL_BOTANICALS}}, translucent droplets and one subtle {{THEME_SYMBOL}} detail. Set it unmistakably in {{SEASON}} using {{SEASON_DETAILS}}. Let sunrise travel diagonally through the scene, adding a different composition and color rhythm from ordinary mountain-lake pictures. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "cozy_1",
+      "category_id": "cozy",
+      "category": "Домашній затишок",
+      "bot_command": "/morning",
+      "variant": 1,
+      "name": "Вікно, чай і книга",
+      "prompt": "Design a lived-in, intimate {{SEASON}} morning by a tall wooden window: a handcrafted cup with visible steam, an open poetry book without legible letters, a soft textile chosen for {{SEASON}}, and {{SEASONAL_BOTANICALS}}. The weather outside clearly matches {{SEASON_DETAILS}}. Use a close low camera angle, delicate sunlight on the table, tactile realism and an authentic home, not a showroom. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "cozy_2",
+      "category_id": "cozy",
+      "category": "Домашній затишок",
+      "bot_command": "/morning",
+      "variant": 2,
+      "name": "Сніданок із несподіваною деталлю",
+      "prompt": "Show a thoughtful breakfast arrangement on a small round kitchen table: a handmade ceramic plate, local seasonal fruit {{SEASONAL_FRUIT}}, herbal infusion, a delicate folded linen napkin, and a subtle {{CREATIVE_ANCHOR}}. Through the door, a {{SEASON}} garden with {{SEASON_DETAILS}} glows at dawn. Editorial still-life photography with off-center styling and quiet joy. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "cozy_3",
+      "category_id": "cozy",
+      "category": "Домашній затишок",
+      "bot_command": "/morning",
+      "variant": 3,
+      "name": "Тераса на початку дня",
+      "prompt": "Make a cinematic morning moment on a covered balcony or rustic porch. A woven chair, small tea tray, blankets or light linen suited to {{SEASON}}, and climbing or dried seasonal plants frame a distant landscape with {{SEASON_DETAILS}}. A fine ray of sunrise illuminates only part of the scene. The mood follows {{DAY_THEME}}; choose an unusual viewpoint through foreground leaves. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "nature_1",
+      "category_id": "nature",
+      "category": "Пробудження природи",
+      "bot_command": "/morning",
+      "variant": 1,
+      "name": "Лісова стежка",
+      "prompt": "Visualize the first sunbeams crossing a quiet woodland trail in {{SEASON}}. Select botanically plausible plants from {{SEASONAL_BOTANICALS}} and believable {{SEASON_DETAILS}}; tiny dew, frost, pollen, or rain droplets only as appropriate to the date. Include a single {{CREATIVE_ANCHOR}} as a natural focal point. Layered depth, cinematic volumetric light, no generic fantasy glows. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "nature_2",
+      "category_id": "nature",
+      "category": "Пробудження природи",
+      "bot_command": "/morning",
+      "variant": 2,
+      "name": "Дихання води",
+      "prompt": "Create a unique dawn portrait of a tranquil natural water scene appropriate to {{SEASON}}: a river bend, lake inlet, marsh pool, or seashore selected for variety, bordered by {{SEASONAL_BOTANICALS}}. Gentle ripples catch warm sunlight, local weather follows {{SEASON_DETAILS}}, and the composition is viewed from an unexpected near-water angle. Convey {{DAY_THEME}} without literal text. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "nature_3",
+      "category_id": "nature",
+      "category": "Пробудження природи",
+      "bot_command": "/morning",
+      "variant": 3,
+      "name": "Небо й простір",
+      "prompt": "Capture a sweeping {{SEASON}} morning over an open landscape—rolling hills, meadow, coastal cliffs, or foothills selected for freshness. Dramatic but gentle sky gradients, rays through thin clouds, and authentic {{SEASON_DETAILS}}. Place one tiny {{THEME_SYMBOL}}-inspired natural detail in the lower third; preserve an expansive uncluttered upper third. Fine art, luminous and hopeful. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "heart_1",
+      "category_id": "heart",
+      "category": "Тепле духовне привітання для групи",
+      "bot_command": "/morning",
+      "variant": 1,
+      "name": "Квіти доброти",
+      "prompt": "Make a tender heartfelt good-morning greeting for a warm Ukrainian spiritual community. A free-form wreath or bouquet of {{SEASONAL_BOTANICALS}} rests in soft {{SEASON}} sunrise, with a small fluttering butterfly only if biologically plausible for the season; otherwise use a feather. Elegant pastel-gold palette, gentle bokeh, empathy and gratitude, no religious iconography or kitsch. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "heart_2",
+      "category_id": "heart",
+      "category": "Тепле духовне привітання для групи",
+      "bot_command": "/morning",
+      "variant": 2,
+      "name": "Світла стежка",
+      "prompt": "Portray belonging and hope through a beautiful winding garden path lit by morning sunshine, leading toward a welcoming glowing clearing. Show {{SEASONAL_BOTANICALS}} and accurate {{SEASON_DETAILS}}, with subtle shafts of gold light through branches and two small natural elements that suggest connection without depicting people. Dreamlike fine art, serene, not supernatural spectacle. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "heart_3",
+      "category_id": "heart",
+      "category": "Тепле духовне привітання для групи",
+      "bot_command": "/morning",
+      "variant": 3,
+      "name": "Тепло одного вогника",
+      "prompt": "Build an intimate symbolic still life for a morning blessing: one candle or warm lantern beside freshly gathered {{SEASONAL_BOTANICALS}}, perhaps a delicate heart formed naturally by two leaves or petals. The open background reveals {{SEASON_DETAILS}} and {{SEASON}} dawn. Restrained gold and rose accents; spacious airy composition, emotionally warm, realistic material textures. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "daily_energy_1",
+      "category_id": "daily_energy",
+      "category": "Енергія дня",
+      "bot_command": "/day",
+      "variant": 1,
+      "name": "Очищення",
+      "prompt": "Create a serene symbolic visual for the topic {{DAY_THEME}}: a single {{THEME_SYMBOL}} near a shallow reflective pond, with a soft breeze shaping its reflection. {{SEASONAL_BOTANICALS}} and {{SEASON_DETAILS}} place the image in {{SEASON}}. Gold, teal and restrained soft green light; highly original negative space and a visual feeling of release, clarity or calm as appropriate to the given theme. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "daily_energy_2",
+      "category_id": "daily_energy",
+      "category": "Енергія дня",
+      "bot_command": "/day",
+      "variant": 2,
+      "name": "Шлях вибору",
+      "prompt": "Illustrate {{DAY_THEME}} as a tangible choice: a quiet fork in a woodland pathway or a small bridge, with one route washed in first golden sunlight. A meaningful {{THEME_SYMBOL}} subtly anchors the foreground. Seasonal clues must match {{SEASON}} and {{SEASON_DETAILS}}. Semi-photoreal fine art, strong leading lines, grounded in the natural world; never depict a horoscope. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "daily_energy_3",
+      "category_id": "daily_energy",
+      "category": "Енергія дня",
+      "bot_command": "/day",
+      "variant": 3,
+      "name": "Рівновага",
+      "prompt": "Represent {{DAY_THEME}} through gentle visual balance: two still stones at the edge of reflective water, crossed circles of light in the reflection, or a pair of symmetric leaves chosen by {{CREATIVE_ANCHOR}}. Frame with botanically appropriate {{SEASONAL_BOTANICALS}} and {{SEASON_DETAILS}}. A sophisticated blue–gold–green palette, dawn illumination, subtle spirituality without dramatic portals. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "intention_1",
+      "category_id": "intention",
+      "category": "Намір / налаштування на день",
+      "bot_command": "/intent",
+      "variant": 1,
+      "name": "Тиха обіцянка собі",
+      "prompt": "A quiet morning ritual scene for the personal intention {{DAY_THEME}}: a closed blank journal without readable writing, handmade pen, small warm candle, a sprig of {{SEASONAL_BOTANICALS}}, and the first light across a wooden desk. Window weather agrees with {{SEASON_DETAILS}}. Place {{THEME_SYMBOL}} as a small motif in the scene, and keep the feeling grounded, reflective and fresh. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "intention_2",
+      "category_id": "intention",
+      "category": "Намір / налаштування на день",
+      "bot_command": "/intent",
+      "variant": 2,
+      "name": "Насіння наміру",
+      "prompt": "Use a visual metaphor for {{DAY_THEME}}: a single seedling, bud, seed or leaf chosen for biological plausibility in {{SEASON}}, in a handmade clay pot on a balcony facing the sunrise. The surroundings show {{SEASON_DETAILS}}. A small {{CREATIVE_ANCHOR}} and unusual shadow pattern make this date visually distinctive; gentle focus, optimistic cinematic realism. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "intention_3",
+      "category_id": "intention",
+      "category": "Намір / налаштування на день",
+      "bot_command": "/intent",
+      "variant": 3,
+      "name": "Крок назустріч світлу",
+      "prompt": "Create a lyrical path from a sheltered shaded foreground to a beautifully luminous early-morning opening in {{SEASON}}. A stone threshold, small arch formed by trees, or footbridge creates the sense of setting an intention. Seasonal plants {{SEASONAL_BOTANICALS}} and weather {{SEASON_DETAILS}} are accurate; include {{THEME_SYMBOL}} subtly. Warm restrained light, cinematic but tranquil. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "affirmation_1",
+      "category_id": "affirmation",
+      "category": "Енергозавантаження / афірмація",
+      "bot_command": "/load",
+      "variant": 1,
+      "name": "Пергамент",
+      "prompt": "Design an exceptionally beautiful blank affirmation-card background: handmade ivory parchment with very subtle fiber texture, restrained gold hairline border, small illustrated corner sprigs of {{SEASONAL_BOTANICALS}}, and soft {{SEASON_PALETTE}} accents. Large uncluttered middle 65% for Ukrainian affirmation text added by software later. The feeling is sacred but inclusive, warm and legible; avoid any letters or ornament crossing the text zone. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "affirmation_2",
+      "category_id": "affirmation",
+      "category": "Енергозавантаження / афірмація",
+      "bot_command": "/load",
+      "variant": 2,
+      "name": "Акварельна пастель",
+      "prompt": "Generate a refined empty affirmation background with watercolor washes of lilac, pale teal, soft blue and warm peach adjusted toward {{SEASON_PALETTE}}. A very faint depiction of {{SEASONAL_BOTANICALS}} appears only in the outer corners. Soft diffused radiance from the border; center 65% nearly uniform and low contrast for later dark text. Editorial minimalism, delicate paper grain. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "affirmation_3",
+      "category_id": "affirmation",
+      "category": "Енергозавантаження / афірмація",
+      "bot_command": "/load",
+      "variant": 3,
+      "name": "Нічна зоряна глибина",
+      "prompt": "Create a premium empty dark violet and deep blue affirmation background with faint golden star dust and subtle line-art seasonal {{SEASONAL_BOTANICALS}} around the frame. Keep center 65% very dark, uniform, uncluttered, suitable for large gold or ivory Ukrainian text added later. Restrained luminous vignette; elegant spiritual atmosphere, never a busy sci-fi portal or fabricated astrology symbols. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "special_1",
+      "category_id": "special",
+      "category": "Особлива дата / сезонна подія",
+      "bot_command": "/special",
+      "variant": 1,
+      "name": "Світлова арка",
+      "prompt": "For the explicitly verified occasion {{EVENT_NAME}}, create an elegant symbolic dawn scene with an arch or corridor of warm reflected light over a {{SEASON}} lake. Incorporate the appropriate supplied symbol {{EVENT_SYMBOL}}, while honoring {{SEASON_DETAILS}} and avoiding unrelated zodiac, moon-phase, or celestial claims. Fresh composition, luminous gold and {{SEASON_PALETTE}}, tasteful celebratory mood. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "special_2",
+      "category_id": "special",
+      "category": "Особлива дата / сезонна подія",
+      "bot_command": "/special",
+      "variant": 2,
+      "name": "Рівновага природи",
+      "prompt": "Build a unique visual celebration of {{EVENT_NAME}} using a natural balance between light and shadow on a believable {{SEASON}} landscape. Include only the supplied {{EVENT_SYMBOL}} rather than inventing astronomical events. Textured seasonal plants {{SEASONAL_BOTANICALS}}, delicate golden rays, a gentle sense of meaning and renewal. Spacious clean header for later greeting and date. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    },
+    {
+      "id": "special_3",
+      "category_id": "special",
+      "category": "Особлива дата / сезонна подія",
+      "bot_command": "/special",
+      "variant": 3,
+      "name": "Святковий натюрморт",
+      "prompt": "Create a celebratory seasonal tabletop arrangement for {{EVENT_NAME}}: a delicate handmade ornament reflecting {{EVENT_SYMBOL}}, {{SEASONAL_BOTANICALS}}, a candle or lantern and local seasonal details {{SEASON_DETAILS}}. Warm beautiful dawn entering from the side, refined rich palette {{SEASON_PALETTE}}, no printed symbols or text, airy layout and a distinctly different camera angle from recent images. For a Ukrainian Telegram morning post on {{DATE_ISO}} ({{WEEKDAY_UK}}); its meaning or mood is {{DAY_THEME}}. Follow the Northern Hemisphere season {{SEASON}}, exact seasonal micro-details {{SEASON_DETAILS}}, and palette {{SEASON_PALETTE}}. Produce a single 16:9 landscape image, intended for 1280×720. Reserve a calm, highly readable upper 28% for a later overlay with exactly “Доброго ранку!” and “{{DATE_UK}}” (the overlay is added in code, NOT by the image model). Keep meaningful content in the middle 75% for safe cropping. No text, numbers, letters, captions, lettering on objects, watermark, logos, recognizable faces, or copyrighted characters. No deformed anatomy, garish neon, busy edge clutter, visual noise, or generic repeated compositions. Avoid these recent visual combinations: {{RECENT_VISUALS}}."
+    }
+  ]
+}

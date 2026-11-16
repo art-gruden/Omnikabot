@@ -60,6 +60,15 @@ CREATE TABLE IF NOT EXISTS usage (
     created REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS usage_user ON usage(user_id, created DESC);
+CREATE TABLE IF NOT EXISTS prompt_log (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind      TEXT    NOT NULL,       -- рубрика
+    prompt_id TEXT    NOT NULL,       -- готовий промт картинки: calendar_2, heart_1…
+    anchor    TEXT    NOT NULL DEFAULT '',
+    user_id   INTEGER NOT NULL,
+    created   REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS prompt_log_kind ON prompt_log(kind, created DESC);
 """
 
 SAMPLES_PER_KIND = 60
@@ -204,6 +213,22 @@ class DB:
             fields["extra"] = json.dumps(fields["extra"], ensure_ascii=False)
         cols = ", ".join(f"{k}=?" for k in fields)
         self._x(f"UPDATE drafts SET {cols} WHERE id=?", (*fields.values(), did))
+
+    # ---------- видані промти картинок (щоб сюжети не повторювалися)
+    def add_prompt_log(self, kind: str, prompt_id: str, anchor: str, user_id: int, keep_days: float = 60) -> None:
+        with self.lock:
+            self._x("INSERT INTO prompt_log(kind, prompt_id, anchor, user_id, created) VALUES(?, ?, ?, ?, ?)",
+                    (kind, prompt_id, anchor, user_id, time.time()))
+            self._x("DELETE FROM prompt_log WHERE created < ?", (time.time() - keep_days * 86400,))
+
+    def prompt_last_used(self, kind: str) -> dict[str, float]:
+        rows = self._x("SELECT prompt_id, MAX(created) c FROM prompt_log WHERE kind=? GROUP BY prompt_id", (kind,))
+        return {r["prompt_id"]: r["c"] for r in rows.fetchall()}
+
+    def prompt_recent(self, kind: str, limit: int = 4) -> list[tuple[str, str]]:
+        rows = self._x("SELECT prompt_id, anchor FROM prompt_log WHERE kind=? ORDER BY created DESC, id DESC LIMIT ?",
+                       (kind, limit))
+        return [(r["prompt_id"], r["anchor"]) for r in rows.fetchall()]
 
     # ---------- облік генерацій (ліміти)
     def add_usage(self, user_id: int, what: str) -> None:
