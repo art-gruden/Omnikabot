@@ -30,6 +30,9 @@ jobs:
       - name: Готові промти картинок
         run: python3 tests/test_prompts.py
 
+      - name: Зображення через Gemini (імітація Telegram + Gemini API)
+        run: python3 tests/test_gemini.py
+
       - name: Бот (імітація Telegram Bot API)
         run: python3 tests/test_bot.py
 

@@ -7,6 +7,8 @@
 #   ./deploy.sh logs | status | restart | stop | start
 #   ./deploy.sh doctor              перевірити налаштування й знайти проблему
 #   ./deploy.sh token | admins | openai | tz    змінити значення в .env
+#   ./deploy.sh gemini              задати ключ Gemini й малювати картинки через Gemini (Nano Banana 2)
+#   ./deploy.sh provider gemini|openai          хто малює картинки (IMAGE_PROVIDER)
 #   ./deploy.sh backup [тека] | restore ФАЙЛ
 #   ./deploy.sh autobackup on|off   щоденна резервна копія о 4:30 (systemd timer)
 #   ./deploy.sh uninstall           зупинити й видалити контейнер (дані лишаються)
@@ -159,6 +161,12 @@ env_set() {  # env_set KEY VALUE
     cat "$tmp" > "$ENV_FILE"; rm -f "$tmp"
 }
 
+set_gemini() {  # set_gemini KEY — ключ Gemini + провайдер зображень
+    env_set GEMINI_API_KEY "$1"
+    env_set IMAGE_PROVIDER gemini
+    [ -n "$(env_get GEMINI_MODEL)" ] || env_set GEMINI_MODEL nano-banana-2-1k
+}
+
 valid_token() { [[ "$1" =~ ^[0-9]{5,12}:[A-Za-z0-9_-]{30,}$ ]]; }
 
 ensure_env() {
@@ -189,6 +197,19 @@ ensure_env() {
         fi
     fi
     [ -n "$key" ] && env_set OPENAI_API_KEY "$key"
+
+    local gkey="${ARG_GEMINI:-$(env_get GEMINI_API_KEY)}"
+    if [ -z "$gkey" ] && [ -z "${ARG_NO_ASK:-}" ]; then
+        echo "Ключ Gemini (малює картинки моделлю Nano Banana 2) беруть на aistudio.google.com → Get API key."
+        if [ "$(ask 'Ввести ключ Gemini зараз? (y/n)' n)" = "y" ]; then
+            gkey="$(ask_secret 'GEMINI_API_KEY')"
+        fi
+    fi
+    if [ -n "$gkey" ]; then
+        set_gemini "$gkey"
+    elif [ "$(env_get IMAGE_PROVIDER)" = "gemini" ]; then
+        env_set IMAGE_PROVIDER openai       # без ключа Gemini картинки малює OpenAI (якщо є його ключ)
+    fi
 
     local tz="${ARG_TZ:-$(env_get TZ)}"
     if [ -z "$tz" ]; then
@@ -349,6 +370,13 @@ cmd_doctor() {
         valid_token "$(env_get BOT_TOKEN)" && ok "BOT_TOKEN заповнений" || { echo "${RED}✖${OFF} BOT_TOKEN порожній або неправильний"; bad=1; }
         [ -n "$(env_get ADMIN_IDS)" ] && ok "ADMIN_IDS: $(env_get ADMIN_IDS)" || warn "ADMIN_IDS порожній — адміном стане перший користувач"
         [ -n "$(env_get OPENAI_API_KEY)" ] && ok "Ключ OpenAI заданий у .env" || warn "Ключа OpenAI у .env немає (можна ввести в меню бота)"
+        local prov; prov="$(env_get IMAGE_PROVIDER)"
+        if [ "$prov" = "gemini" ]; then
+            [ -n "$(env_get GEMINI_API_KEY)" ] && ok "Зображення: Gemini, модель $(env_get GEMINI_MODEL)" \
+                || warn "IMAGE_PROVIDER=gemini, але GEMINI_API_KEY порожній — картинки не малюватимуться (./deploy.sh gemini)"
+        else
+            ok "Зображення: ${prov:-openai} (перемкнути: ./deploy.sh provider gemini)"
+        fi
         ok "Часовий пояс: $(env_get TZ)"
     else echo "${RED}✖${OFF} немає .env — запустіть ./deploy.sh"; bad=1; fi
     if [ -d "$PHOTOS_DIR" ]; then
@@ -370,13 +398,14 @@ cmd_doctor() {
 
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"; }
 
-ARG_TOKEN=""; ARG_ADMINS=""; ARG_OPENAI=""; ARG_TZ=""; ARG_NO_ASK=""
+ARG_TOKEN=""; ARG_ADMINS=""; ARG_OPENAI=""; ARG_GEMINI=""; ARG_TZ=""; ARG_NO_ASK=""
 CMD=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --token)   ARG_TOKEN="${2:-}"; shift 2 ;;
         --admins)  ARG_ADMINS="${2:-}"; shift 2 ;;
         --openai)  ARG_OPENAI="${2:-}"; shift 2 ;;
+        --gemini)  ARG_GEMINI="${2:-}"; shift 2 ;;
         --tz)      ARG_TZ="${2:-}"; shift 2 ;;
         --yes|-y)  ARG_NO_ASK=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -399,6 +428,12 @@ case "${CMD:-install}" in
                  fix_docker_access; compose up -d; ok "ADMIN_IDS=$a" ;;
     openai)      k="${ARG_OPENAI:-$(ask_secret 'OPENAI_API_KEY (порожньо — прибрати)')}"; env_set OPENAI_API_KEY "$k"
                  fix_docker_access; compose up -d; ok "Ключ OpenAI оновлено в .env (у боті він також налаштовується через меню)." ;;
+    gemini)      k="${ARG_GEMINI:-$(ask_secret 'GEMINI_API_KEY')}"; [ -n "$k" ] || die "Ключ Gemini порожній."
+                 set_gemini "$k"; fix_docker_access; compose up -d
+                 ok "Ключ Gemini збережено в .env; зображення малює Gemini ($(env_get GEMINI_MODEL))." ;;
+    provider)    p="${1:-}"; case "$p" in gemini|openai) ;; *) die "Вкажіть провайдера: ./deploy.sh provider gemini|openai" ;; esac
+                 [ "$p" != "gemini" ] || [ -n "$(env_get GEMINI_API_KEY)" ] || die "Спершу задайте ключ: ./deploy.sh gemini"
+                 env_set IMAGE_PROVIDER "$p"; fix_docker_access; compose up -d; ok "IMAGE_PROVIDER=$p" ;;
     tz)          z="${ARG_TZ:-$(ask 'Часовий пояс' "$(env_get TZ)")}"; env_set TZ "$z"; fix_docker_access; compose up -d; ok "TZ=$z" ;;
     backup)      cmd_backup "${1:-}" ;;
     restore)     cmd_restore "${1:-}" ;;

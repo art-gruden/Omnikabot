@@ -79,7 +79,7 @@ HELP = (
     "📝 <b>Рубрики</b> (/post): привітання з днем народження, ранкове завантаження, "
     "ранкове привітання «Омніка», налаштування на день «Єдність сердець». "
     "Бот оформлює текст у стилі ваших попередніх постів, підбирає готовий промт картинки під рубрику й дату "
-    "та малює її через ChatGPT. Під промтом є кнопки «Відкрити в ChatGPT» і «Скопіювати промт».\n\n"
+    "та малює її через Gemini або OpenAI (вибір у .env). Під промтом є кнопки «Відкрити в ChatGPT» і «Скопіювати промт».\n\n"
     "• <code>*слово*</code> — виділити кольором\n"
     "• перший рядок, що починається з <code>#</code>, — заголовок лише для цієї листівки "
     "(<code>#</code> без тексту — без заголовка)\n"
@@ -251,8 +251,8 @@ class CardBot(PostsMixin):
     def card_kb(self) -> InlineKeyboardMarkup:
         rows = [[("🔄 Інший шаблон", "r:next"), ("🖼 Вибрати", "r:pick")],
                 [("📐 Розмір", "r:size"), ("📄 Файлом", "r:file")]]
-        if self.oai_ready():
-            rows.append([("🎨 Новий фон через ChatGPT", "r:bg")])
+        if self.image_ready():
+            rows.append([(f"🎨 Новий фон через {self.image_label()}", "r:bg")])
         return kb(rows)
 
     async def send_card(self, ctx, chat_id: int, uid: int, text: str, title_override: str | None,
@@ -430,7 +430,8 @@ class CardBot(PostsMixin):
                     f"Хто користується ботом: <b>{acc}</b>\n"
                     f"Хто додає шаблони: <b>{add}</b>\n"
                     f"Дозволених користувачів: {n}\n"
-                    f"ChatGPT: <b>{'підключений' if self.oai_ready() else 'не підключений'}</b>\n\n"
+                    f"ChatGPT: <b>{'підключений' if self.oai_ready() else 'не підключений'}</b>\n"
+                    f"{esc(self.image_status())}\n\n"
                     "«Мої налаштування → типові»: нові користувачі отримають ваші шаблон, заголовок, розмір тощо.")
             rows = [[("🤖 OpenAI (ChatGPT)", "m:oai")],
                     [(f"👥 Бот: {acc}", "a:mode"), (f"🗂 Шаблони: {add}", "a:addmode")],
@@ -905,8 +906,8 @@ class CardBot(PostsMixin):
                 await q.answer("Надсилаю файлом…")
                 return await self.send_card(ctx, chat_id, uid, text, title, force_file=True)
             if act == "bg":
-                if not self.oai_ready():
-                    return await q.answer("Потрібен ключ OpenAI: меню → Адміністрування → OpenAI", show_alert=True)
+                if not self.image_ready():
+                    return await q.answer(self.images.provider.not_ready_hint(), show_alert=True)
                 await q.answer("Малюю фон…")
                 return await self.regenerate_card_background(ctx, chat_id, uid, text, title)
         if kind == "tr":

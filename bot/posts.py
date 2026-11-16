@@ -1,4 +1,6 @@
-"""Рубрики постів у боті: оформлення тексту, промти й генерація зображень через OpenAI.
+"""Рубрики постів у боті: оформлення тексту (OpenAI), промти й генерація зображень.
+
+Зображення малює провайдер із .env (IMAGE_PROVIDER=gemini|openai) — див. bot/image_gen.py.
 
 Підмішується до CardBot (bot/main.py): екрани меню, стани введення, обробники кнопок.
 Префікси callback_data:
@@ -26,6 +28,7 @@ from telegram.error import BadRequest
 from textcard import render as R
 
 from . import content as C
+from . import image_gen as IG
 from . import image_prompts as IP
 from . import openai_api as O
 
@@ -62,6 +65,25 @@ class PostsMixin:
 
     def oai_ready(self) -> bool:
         return bool(self.oai_cfg()["key"])
+
+    @property
+    def images(self) -> IG.ImageGenerator:
+        """Генератор зображень; провайдер вибирається в .env під час першого звернення."""
+        if getattr(self, "_images", None) is None:
+            self._images = IG.ImageGenerator(self.db, self.data_dir, self.oai_cfg)
+        return self._images
+
+    def image_ready(self) -> bool:
+        return self.images.provider.ready()
+
+    def image_label(self) -> str:
+        return self.images.provider.label
+
+    def image_status(self) -> str:
+        p = self.images.provider
+        size = f", {p.image_size}" if getattr(p, "image_size", "") else ""
+        state = "" if p.ready() else " — ключ не заданий"
+        return f"🖼 Зображення малює: {p.label} ({p.model}{size}){state}"
 
     def image_quota_left(self, uid: int) -> int:
         limit = int(self.oai_cfg().get("limit") or 0)
@@ -181,7 +203,7 @@ class PostsMixin:
     def prompt_kb(self, did: str, url: str | None):
         from .main import kb
         rows = [([("🌐 Відкрити в ChatGPT", url)] if url else []) + [("📋 Скопіювати промт", f"p:copy:{did}")]]
-        if self.oai_ready():
+        if self.image_ready():
             rows.append([("🖌 Згенерувати картинку", f"p:gen:{did}")])
         rows.append([("🔁 Інший промт", f"p:newp:{did}"), ("✏️ Змінити промт", f"p:editp:{did}")])
         return kb(rows)
@@ -208,15 +230,61 @@ class PostsMixin:
                 if lim > IP.SAFE_BUTTON_URL:
                     self.db.kv_set("chatgpt_url_limit", IP.SAFE_BUTTON_URL)
 
-    async def gen_image(self, uid: int, prompt: str, width: int, height: int) -> bytes:
+    async def gen_image(self, uid: int, prompt: str, width: int, height: int, *, kind: str = "",
+                        prompt_id: str = "", category: str = "") -> IG.GeneratedImage:
+        """Одне зображення за промтом через вибраний провайдер: збережений файл + метадані."""
         cfg = self.oai_cfg()
         if self.image_quota_left(uid) <= 0:
-            raise O.OpenAIError(f"Вичерпано денний ліміт генерацій зображень ({cfg['limit']} на добу). "
-                                "Ліміт змінюється в 🛠 Адміністрування → 🤖 OpenAI.")
-        data = await self.oai().image(prompt, O.pick_size(width, height), quality=cfg.get("quality", "high"))
+            raise IG.ImageGenError(f"Вичерпано денний ліміт генерацій зображень ({cfg['limit']} на добу). "
+                                   "Ліміт змінюється в 🛠 Адміністрування → 🤖 OpenAI.", fallback_ok=False)
+        img = await self.images.generate(prompt, width=width, height=height, uid=uid, kind=kind,
+                                         prompt_id=prompt_id, category=category, quality=cfg.get("quality", "high"))
         self.db.add_usage(uid, "image")
-        log.info("user %s: згенеровано зображення (%d КБ)", uid, len(data) // 1024)
-        return data
+        return img
+
+    def backup_image(self) -> Path | None:
+        """Запасна картинка, якщо генерація не вдалася: фото дня ddmm.jpg, далі — папка IMAGE_BACKUP_DIR."""
+        photo = C.day_photo()
+        if photo:
+            return photo
+        folder = Path(os.environ.get("IMAGE_BACKUP_DIR") or self.data_dir / "backup-images")
+        try:
+            files = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in C.PHOTO_EXT)
+        except OSError:
+            return None
+        if not files:
+            return None
+        used = set(self.db.image_paths("backup"))
+        fresh = [p for p in files if str(p) not in used]
+        return fresh[0] if fresh else files[dt.date.today().toordinal() % len(files)]
+
+    async def image_fallback(self, ctx, chat_id: int, uid: int, d, prompt: str, err: IG.ImageGenError):
+        """Після невдалих спроб: запасна картинка для посту або безпечна зупинка для листівки."""
+        if not err.fallback_ok:
+            return
+        k = C.KINDS[d["kind"]]
+        if k.output == "card":
+            return await ctx.bot.send_message(
+                chat_id, "ℹ️ Листівка лишається на поточному фоні. Спробуйте ще раз пізніше або відкрийте промт "
+                         "у ChatGPT кнопкою «🎨 Промт картинки».", reply_markup=self.draft_kb(d))
+        if k.use_day_photo and C.day_photo():
+            return await ctx.bot.send_message(chat_id, "ℹ️ Пост уже має фото дня — воно лишається ілюстрацією.",
+                                              reply_markup=self.draft_kb(d))
+        src = self.backup_image()
+        if not src:
+            return await ctx.bot.send_message(
+                chat_id, "ℹ️ Запасної картинки немає: покладіть фото на сьогодні (ddmm.jpg) у папку фото. "
+                         "Пост лишається без нової ілюстрації.", reply_markup=self.draft_kb(d))
+        try:
+            img = await asyncio.to_thread(self.images.backup, src, uid=uid, kind=d["kind"], prompt=prompt,
+                                          error=str(err))
+        except (OSError, IG.ImageGenError) as e:
+            log.info("запасну картинку %s не вдалося прочитати: %s", src.name, e)
+            return await ctx.bot.send_message(chat_id, "ℹ️ Запасну картинку не вдалося прочитати. "
+                                                       "Пост лишається без нової ілюстрації.")
+        await ctx.bot.send_photo(chat_id, InputFile(io.BytesIO(img.data), filename=src.name),
+                                 caption=f"🖼 Запасна картинка замість нової: {src.name}",
+                                 reply_markup=self.draft_kb(d))
 
     # ------------------------------------------------------------ налаштування рубрики
 
@@ -244,7 +312,7 @@ class PostsMixin:
             rows.append(back)
             gpt = "✅ підключений" if self.oai_ready() else "⚠️ не підключений (оформлення буде простим)"
             return ("📝 <b>Пости</b>\nВиберіть рубрику — я попрошу текст і оформлю його.\n"
-                    f"ChatGPT: {gpt}"), kb(rows)
+                    f"ChatGPT: {gpt}\n{esc(self.image_status())}"), kb(rows)
 
         if name == "kinds":
             rows = [[(f"{C.KINDS[i].emoji} {C.KINDS[i].name}", f"pm:cfg:{i}")] for i in C.ORDER]
@@ -300,7 +368,10 @@ class PostsMixin:
                     f"💬 Модель тексту: <code>{esc(c['text_model'])}</code>\n"
                     f"🖼 Модель зображень: <code>{esc(c['image_model'])}</code>\n"
                     f"✨ Якість зображень: {esc(c['quality'])}\n"
-                    f"📊 Ліміт зображень: {c['limit']} на добу на людину"
+                    f"📊 Ліміт зображень: {c['limit']} на добу на людину\n"
+                    f"{esc(self.image_status())}"
+                    + ("\nℹ️ Модель і якість зображень вище стосуються лише OpenAI; провайдер задається "
+                       "в .env (IMAGE_PROVIDER)." if self.images.provider.name != "openai" else "")
                     + (f"\n🌐 Адреса API: <code>{esc(c['base_url'])}</code>" if c["base_url"] != O.DEFAULT_BASE_URL else "")
                     + "\n\nКлюч беруть на platform.openai.com → API keys. Генерація тексту й зображень "
                       "оплачується з вашого рахунку OpenAI.")
@@ -368,7 +439,7 @@ class PostsMixin:
         k = C.KINDS[draft["kind"]]
         did = draft["id"]
         rows = [[("🔄 Інший варіант", f"p:redo:{did}"), ("📋 Мій текст", f"p:src:{did}")]]
-        if self.oai_ready():
+        if self.image_ready():
             rows.append([("🎨 Промт картинки", f"p:prompt:{did}"), ("🖌 Згенерувати картинку", f"p:gen:{did}")])
         else:
             rows.append([("🎨 Промт картинки", f"p:prompt:{did}")])
@@ -483,19 +554,28 @@ class PostsMixin:
         except R.RenderError:
             w, h = 1280, 782
         if k.output == "post":
-            w, h = 1536, 1024
-        wait = await ctx.bot.send_message(chat_id, "🖌 Малюю зображення через ChatGPT… це може зайняти до хвилини.")
+            w, h = self.images.provider.post_size
+        meta = json.loads(d["extra"] or "{}").get("ip") or {}
+        prompt_id = meta.get("id", "") if meta.get("title") else ""      # свій промт — без категорії
+        try:
+            category = IP.load_library().get(prompt_id, {}).get("category_id", "") if prompt_id else ""
+        except IP.PromptError:
+            category = ""
+        label = self.image_label()
+        wait = await ctx.bot.send_message(chat_id, f"🖌 Малюю зображення через {label}… це може зайняти до хвилини.")
         await ctx.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
         try:
-            data = await self.gen_image(uid, prompt, w, h)
-        except O.OpenAIError as e:
+            img = await self.gen_image(uid, prompt, w, h, kind=d["kind"], prompt_id=prompt_id, category=category)
+        except IG.ImageGenError as e:
             await self._del(ctx, chat_id, wait.message_id)
-            return await ctx.bot.send_message(chat_id, f"⚠️ {esc(e)}", parse_mode=ParseMode.HTML)
+            await ctx.bot.send_message(chat_id, f"⚠️ {esc(e)}", parse_mode=ParseMode.HTML)
+            return await self.image_fallback(ctx, chat_id, uid, d, prompt, e)
+        data = img.data
         await self._del(ctx, chat_id, wait.message_id)
         left = self.image_quota_left(uid)
         tail = f" Залишилось сьогодні: {left}." if left < 10 ** 5 else ""
         if k.output == "post":
-            await ctx.bot.send_photo(chat_id, InputFile(io.BytesIO(data), filename="illustration.png"),
+            await ctx.bot.send_photo(chat_id, InputFile(io.BytesIO(data), filename="illustration" + Path(img.path).suffix),
                                      caption=f"🖼 Картинка до посту.{tail}", reply_markup=self.draft_kb(d))
             return
         # для листівки: фон стає шаблоном, одразу малюємо листівку з текстом
@@ -513,7 +593,7 @@ class PostsMixin:
         extra["template"] = t.id
         self.db.update_draft(did, extra=extra)
         self.set_st(uid, template=t.id)
-        await self.send_draft(ctx, chat_id, uid, did, note=f"🎨 Новий фон від ChatGPT.{tail}")
+        await self.send_draft(ctx, chat_id, uid, did, note=f"🎨 Новий фон від {label}.{tail}")
 
     def cleanup_generated(self, uid: int) -> None:
         mine = [t for t in self.store.all() if t.custom and t.config.get("generated") and t.config.get("owner") == uid]
@@ -870,8 +950,8 @@ class PostsMixin:
                 await ctx.bot.send_message(chat_id, "✏️ Надішліть свій промт (англійською — так краще). /cancel — скасувати.")
                 return True
             if act == "gen":
-                if not self.oai_ready():
-                    await q.answer("Потрібен ключ OpenAI: меню → Адміністрування → OpenAI", show_alert=True)
+                if not self.image_ready():
+                    await q.answer(self.images.provider.not_ready_hint(), show_alert=True)
                     return True
                 await q.answer("Малюю…")
                 await self.do_generate(ctx, chat_id, uid, did)

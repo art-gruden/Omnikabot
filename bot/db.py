@@ -69,6 +69,22 @@ CREATE TABLE IF NOT EXISTS prompt_log (
     created   REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS prompt_log_kind ON prompt_log(kind, created DESC);
+CREATE TABLE IF NOT EXISTS image_log (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id   INTEGER NOT NULL,
+    kind      TEXT    NOT NULL DEFAULT '',   -- рубрика
+    prompt_id TEXT    NOT NULL DEFAULT '',   -- готовий промт, якщо був
+    category  TEXT    NOT NULL DEFAULT '',
+    provider  TEXT    NOT NULL,              -- gemini | openai | backup
+    model     TEXT    NOT NULL DEFAULT '',
+    variation TEXT    NOT NULL DEFAULT '',   -- варіація композиції (для Gemini)
+    status    TEXT    NOT NULL,              -- ok | failed | backup
+    attempts  INTEGER NOT NULL DEFAULT 0,
+    path      TEXT    NOT NULL DEFAULT '',   -- де збережено файл
+    prompt_sha TEXT   NOT NULL DEFAULT '',
+    created   REAL    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS image_log_kind ON image_log(kind, created DESC);
 """
 
 SAMPLES_PER_KIND = 60
@@ -229,6 +245,31 @@ class DB:
         rows = self._x("SELECT prompt_id, anchor FROM prompt_log WHERE kind=? ORDER BY created DESC, id DESC LIMIT ?",
                        (kind, limit))
         return [(r["prompt_id"], r["anchor"]) for r in rows.fetchall()]
+
+    # ---------- історія генерацій зображень (метадані + щоб картинки не повторювалися)
+    def add_image_log(self, user_id: int, kind: str, prompt_id: str, category: str, provider: str, model: str,
+                      variation: str, status: str, attempts: int, path: str, prompt_sha: str,
+                      keep_days: float = 90) -> None:
+        with self.lock:
+            self._x("INSERT INTO image_log(user_id, kind, prompt_id, category, provider, model, variation, status, "
+                    "attempts, path, prompt_sha, created) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (user_id, kind, prompt_id, category, provider, model, variation, status, attempts, path,
+                     prompt_sha, time.time()))
+            self._x("DELETE FROM image_log WHERE created < ?", (time.time() - keep_days * 86400,))
+
+    def image_recent(self, kind: str, limit: int = 12, status: str = "ok") -> list[sqlite3.Row]:
+        """Останні генерації рубрики, новіші першими."""
+        return self._x("SELECT * FROM image_log WHERE kind=? AND status=? ORDER BY created DESC, id DESC LIMIT ?",
+                       (kind, status, limit)).fetchall()
+
+    def image_paths(self, status: str, limit: int = 200) -> list[str]:
+        rows = self._x("SELECT path FROM image_log WHERE status=? ORDER BY id DESC LIMIT ?", (status, limit))
+        return [r["path"] for r in rows.fetchall()]
+
+    def image_last(self, user_id: int | None = None) -> sqlite3.Row | None:
+        if user_id is None:
+            return self._x("SELECT * FROM image_log ORDER BY id DESC LIMIT 1").fetchone()
+        return self._x("SELECT * FROM image_log WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,)).fetchone()
 
     # ---------- облік генерацій (ліміти)
     def add_usage(self, user_id: int, what: str) -> None:
