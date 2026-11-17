@@ -5,7 +5,9 @@
   2. додає загальний блок вимог (унікальна композиція, сезон, спокійний верх кадру, без тексту, 16:9);
   3. додає вимоги для категорії картинки (календарна картка, затишок, природа, енергія дня, намір,
      фон афірмації, особлива дата, а також привітання групи й день народження);
-  4. додає сезон на сьогодні, варіацію композиції та сюжети останніх генерацій, яких слід уникати.
+  4. додає сезон на сьогодні, варіацію композиції та сюжети останніх генерацій, яких слід уникати;
+  5. якщо треба, щоб модель намалювала текст у кадрі (дату для «Омніки», афірмацію для листівки) —
+     додає блок, який скасовує заборону тексту саме для цього напису (draw_text).
 """
 from __future__ import annotations
 
@@ -83,6 +85,35 @@ VARIATIONS_BACKGROUND = [
     "a thin asymmetric botanical frame with wide empty margins",
 ]
 
+# Текст у кадрі: вмикається, коли переданий draw_text. Скасовує заборону напису саме для нього.
+DRAW_TEXT_RULES = """Text inside this image (this block overrides the rules above that forbid text, letters and numerals \
+— but only for this one inscription; every other requirement still applies):
+- Render this text exactly once, spelled character for character: {text}
+- It is Ukrainian (Cyrillic). Copy the characters exactly as given: do not translate, transliterate, abbreviate, \
+correct, repeat or add anything.
+- {style}
+- The lettering must be clean, correctly spelled, fully inside the frame, with generous margins, and easy to read \
+against the background behind it.
+- Add no other text, letters, numbers, captions, signatures, watermarks or logos anywhere in the image."""
+
+# Розмір і колір напису з датою змінюються щодня (довжини списків різні, тож пара не повторюється 42 дні).
+DATE_SIZES = [
+    "Set it in a large, confident size across the upper area",
+    "Set it in a medium size, modest and airy, in the upper left area",
+    "Set it in an oversized, bold size that dominates the upper third",
+    "Set it in a refined medium-small size in the upper right area",
+    "Set it in a large, widely letter-spaced size centred in the upper area",
+    "Set it in a tall, slender size along the upper left, with wide empty space beside it",
+]
+DATE_COLORS = [
+    "in warm gold", "in soft ivory white", "in muted terracotta", "in deep teal",
+    "in gentle rose", "in dark chocolate brown with a faint light edge", "in pale mint green",
+]
+DATE_FACES = [
+    "an elegant serif face", "a clean light sans-serif face", "a gentle handwritten script",
+    "a calm rounded sans-serif face", "a classic high-contrast serif face",
+]
+
 _CYR = "А-Яа-яІіЇїЄєҐґ"
 _OVERLAY = re.compile(r"with exactly [“\"«][^”\"»]*[”\"»] and [“\"«][^”\"»]*[”\"»]")
 _QUOTED_CYR = re.compile(rf"[“\"«][^”\"»]*[{_CYR}][^”\"»]*[”\"»]")
@@ -112,6 +143,18 @@ def strip_literal_text(prompt: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", out).strip()
 
 
+def date_draw_style(d: dt.date) -> str:
+    """Опис стилю напису з датою: розмір, шрифт і колір, інші щодня."""
+    n = d.toordinal()
+    return (f"{DATE_SIZES[n % len(DATE_SIZES)]}, in {DATE_FACES[n % len(DATE_FACES)]}, "
+            f"{DATE_COLORS[n % len(DATE_COLORS)]}, harmonised with the scene")
+
+
+def draw_block(text: str, style: str = "") -> str:
+    return DRAW_TEXT_RULES.format(text=f"«{text.strip()}»",
+                                  style=style or "Place it in the calm upper area of the image")
+
+
 def variations_for(category: str) -> list[str]:
     return VARIATIONS_BACKGROUND if category in CENTER_TEXT else VARIATIONS_SCENE
 
@@ -126,8 +169,10 @@ def pick_variation(category: str, recent: list[str]) -> str:
 
 
 def adapt(prompt: str, *, category: str = "", date: dt.date | None = None, variation: str = "",
-          avoid: list[str] | None = None) -> str:
-    """Готовий промт -> промт для Gemini. category — category_id готового промту або '' для власного."""
+          avoid: list[str] | None = None, draw_text: str = "", draw_style: str = "") -> str:
+    """Готовий промт -> промт для Gemini. category — category_id готового промту або '' для власного.
+
+    draw_text — напис, який модель має намалювати в кадрі (інакше текст у зображенні заборонений)."""
     date = date or dt.date.today()
     season, details, palette, *_ = IP.SEASONS[date.month]
     parts = [strip_literal_text(prompt), GEMINI_BASE]
@@ -142,4 +187,6 @@ def adapt(prompt: str, *, category: str = "", date: dt.date | None = None, varia
     if avoid:
         extra.append("Previously generated scenes to stay clearly different from: " + "; ".join(avoid) + ".")
     parts.append("\n".join("- " + e for e in extra))
+    if draw_text.strip():
+        parts.append(draw_block(draw_text, draw_style))
     return "\n\n".join(parts)

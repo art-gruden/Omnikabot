@@ -28,23 +28,16 @@ from typing import Callable
 
 import httpx
 
+from . import gemini_api as GA
 from . import gemini_prompt as GP
 from . import image_prompts as IP
 from . import openai_api as O
 
 log = logging.getLogger("textcard-bot.images")
 
-GEMINI_BASE_URL_DEFAULT = "https://generativelanguage.googleapis.com/v1beta"
-# назви-псевдоніми -> ID моделі в Gemini API
-GEMINI_ALIASES = {
-    "nano-banana": "gemini-2.5-flash-image",
-    "nano-banana-2": "gemini-3.1-flash-image",
-    "nano-banana-2-lite": "gemini-3.1-flash-lite-image",
-    "nano-banana-2.1": "gemini-nano-banana-2.1",
-    "nano-banana-pro": "gemini-3-pro-image",
-}
+GEMINI_BASE_URL_DEFAULT = GA.BASE_URL_DEFAULT
+GEMINI_ALIASES = GA.ALIASES                 # назви-псевдоніми -> ID моделі (спільні з текстом)
 GEMINI_RATIOS = ("1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9")
-RETRY_STATUS = {408, 429, 500, 502, 503, 504}
 EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
 
 
@@ -85,6 +78,7 @@ class GeneratedImage:
     prompt_id: str = ""           # готовий промт: calendar_2…
     category: str = ""
     variation: str = ""
+    draw_text: str = ""           # текст, який мала намалювати модель (дата, афірмація)
     fallback: bool = False        # True — це запасна картинка, а не нова генерація
     error: str = ""               # чому знадобилась запасна
     created: float = field(default_factory=time.time)
@@ -155,12 +149,7 @@ class OpenAIImageProvider(ImageProvider):
 
 def parse_gemini_model(value: str, default_size: str = "1K") -> tuple[str, str]:
     """«nano-banana-2-1k» -> («gemini-3.1-flash-image», «1K»). Справжній ID моделі лишається як є."""
-    value = (value or "").strip() or "nano-banana-2"
-    size = (default_size or "1K").upper()
-    m = re.fullmatch(r"(?i)(.+?)-(512|[124]k)", value)
-    if m:
-        value, size = m.group(1), m.group(2).upper()
-    return GEMINI_ALIASES.get(value.lower(), value), size
+    return GA.parse_model(value, default_size)
 
 
 def nearest_ratio(width: int, height: int) -> str:
@@ -169,32 +158,15 @@ def nearest_ratio(width: int, height: int) -> str:
     return min(GEMINI_RATIOS, key=lambda s: abs(math.log(r / (int(s.split(":")[0]) / int(s.split(":")[1])))))
 
 
-def _find_images(node, out: list) -> None:
-    """Збирає зображення з відповіді Gemini в будь-якій із форм (generateContent / interactions)."""
-    if isinstance(node, dict):
-        if node.get("thought") is True:                       # чернеткові «думки» моделі — не результат
-            return
-        inline = node.get("inlineData") or node.get("inline_data")
-        if isinstance(inline, dict) and inline.get("data"):
-            out.append((inline["data"], inline.get("mimeType") or inline.get("mime_type") or "image/png"))
-        elif node.get("type") == "image" and isinstance(node.get("data"), str):
-            out.append((node["data"], node.get("mime_type") or node.get("mimeType") or "image/png"))
-        for v in node.values():
-            _find_images(v, out)
-    elif isinstance(node, list):
-        for v in node:
-            _find_images(v, out)
-
-
 class GeminiImageProvider(ImageProvider):
     name, label = "gemini", "Gemini"
     post_size = (1376, 768)       # 16:9
 
     def __init__(self):
-        self.api_key = _env("GEMINI_API_KEY")
-        self.base_url = (_env("GEMINI_BASE_URL") or GEMINI_BASE_URL_DEFAULT).rstrip("/")
-        self._model, self.image_size = parse_gemini_model(_env("GEMINI_MODEL"), _env("GEMINI_IMAGE_SIZE") or "1K")
-        self.api = "interactions" if _env("GEMINI_API").lower() == "interactions" else "generateContent"
+        self.api_key = GA.api_key()
+        self.base_url = GA.base_url()
+        self._model, self.image_size = GA.parse_model(_env("GEMINI_MODEL"), _env("GEMINI_IMAGE_SIZE") or "1K")
+        self.api = GA.api_mode()
         self.timeout = _env_num("GEMINI_TIMEOUT", 120)
         self.attempts = max(1, int(_env_num("IMAGE_ATTEMPTS", 3)))
 
@@ -230,55 +202,20 @@ class GeminiImageProvider(ImageProvider):
         if not self.ready():
             raise ImageGenError("Ключ Gemini не заданий: додайте GEMINI_API_KEY у .env.", fallback_ok=False)
         url, payload = self.request(prompt, width, height)
-        headers = {"x-goog-api-key": self.api_key, "Content-Type": "application/json"}   # ключ у заголовку, не в URL
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=20)) as cli:
-                r = await cli.post(url, json=payload, headers=headers)
-        except httpx.TimeoutException:
-            raise ImageGenError(f"Gemini не відповів за {self.timeout:.0f} с.", retryable=True) from None
-        except httpx.HTTPError as e:
-            raise ImageGenError(f"Не вдалося звернутися до Gemini: {type(e).__name__}.", retryable=True) from None
-        if r.status_code >= 300:
-            raise ImageGenError(self._explain(r.status_code, r.text), retryable=r.status_code in RETRY_STATUS)
-        try:
-            body = r.json()
-        except ValueError:
-            raise ImageGenError("Gemini повернув несподівану відповідь.", retryable=True) from None
-        block = (body.get("promptFeedback") or {}).get("blockReason") if isinstance(body, dict) else None
-        if block:
-            raise ImageGenError(f"Gemini відхилив промт через правила вмісту ({block}). Змініть промт.")
-        found: list = []
-        _find_images(body, found)
+            body = await GA.post(url, payload, timeout=self.timeout, model=self._model,
+                                 interactions=self.api == "interactions")
+        except GA.GeminiError as e:
+            raise ImageGenError(str(e), retryable=e.retryable) from None
+        found = GA.find_images(body)
         if not found:
-            reason = ""
-            try:
-                reason = body["candidates"][0].get("finishReason", "")
-            except (KeyError, IndexError, TypeError, AttributeError):
-                pass
+            reason = GA.finish_reason(body)
             raise ImageGenError("Gemini не повернув зображення" + (f" ({reason})." if reason else "."), retryable=True)
         data64, mime = found[-1]                               # рівно одне: останнє, остаточне зображення
         try:
             return base64.b64decode(data64), mime
         except Exception:  # noqa: BLE001
             raise ImageGenError("Не вдалося прочитати зображення від Gemini.", retryable=True) from None
-
-    def _explain(self, status: int, body: str) -> str:
-        msg = ""
-        try:
-            err = json.loads(body).get("error") or {}
-            msg = (err.get("message") or "")[:300]
-        except (ValueError, AttributeError):
-            msg = (body or "")[:300]
-        if status in (401, 403) or "API key not valid" in msg or "API_KEY_INVALID" in body:
-            return "Gemini не прийняв ключ. Перевірте GEMINI_API_KEY у .env."
-        if status == 404:
-            return (f"Gemini не знає моделі «{self._model}» (404). Перевірте GEMINI_MODEL у .env, "
-                    "наприклад nano-banana-2-1k.")
-        if status == 429:
-            return "Gemini: перевищено ліміт запитів або квоту (429). Спробуйте за хвилину."
-        if status >= 500:
-            return f"Gemini тимчасово недоступний ({status})."
-        return f"Gemini повернув помилку {status}: {msg}"
 
 
 def provider_name() -> str:
@@ -320,13 +257,15 @@ class ImageGenerator:
         return variations, list(dict.fromkeys(scenes))
 
     async def generate(self, prompt: str, *, width: int, height: int, uid: int = 0, kind: str = "",
-                       prompt_id: str = "", category: str = "", quality: str = "") -> GeneratedImage:
+                       prompt_id: str = "", category: str = "", quality: str = "",
+                       draw_text: str = "", draw_style: str = "") -> GeneratedImage:
         p = self.provider
         if not p.ready():
             raise ImageGenError(p.not_ready_hint() + ".", fallback_ok=False)
         used, scenes = self._history(kind)
         variation = GP.pick_variation(category, used) if p.name == "gemini" else ""
-        final = p.adapt(prompt, category=category, date=dt.date.today(), variation=variation, avoid=scenes)
+        final = p.adapt(prompt, category=category, date=dt.date.today(), variation=variation, avoid=scenes,
+                        draw_text=draw_text, draw_style=draw_style)
         sha = hashlib.sha256(final.encode()).hexdigest()[:12]
         last: ImageGenError | None = None
         for attempt in range(1, p.attempts + 1):
@@ -346,7 +285,8 @@ class ImageGenerator:
                          path.name)
                 img = GeneratedImage(provider=p.name, model=p.model, prompt=final, source_prompt=prompt,
                                      path=str(path), mime=mime, width=w, height=h, attempts=attempt, kind=kind,
-                                     prompt_id=prompt_id, category=category, variation=variation, data=data)
+                                     prompt_id=prompt_id, category=category, variation=variation,
+                                     draw_text=draw_text, data=data)
                 self.db.add_image_log(uid, kind, prompt_id, category, p.name, p.model, variation, "ok", attempt,
                                       str(path), sha)
                 return img
@@ -413,6 +353,7 @@ def _cli() -> None:
     ap.add_argument("--category", default="", help="calendar, cozy, nature, daily_energy, intention, affirmation, "
                                                    "special, heart, birthday")
     ap.add_argument("--size", default="1376x768")
+    ap.add_argument("--draw-text", default="", help="текст, який модель має намалювати в кадрі")
     ap.add_argument("--show-prompt", action="store_true", help="надрукувати промт після адаптера й не малювати")
     a = ap.parse_args()
     logging.basicConfig(level="INFO", format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -422,11 +363,13 @@ def _cli() -> None:
            "image_model": O.DEFAULT_IMAGE_MODEL, "quality": "high"}
     gen = ImageGenerator(DB(data_dir / "bot.sqlite3"), data_dir, lambda: cfg)
     if a.show_prompt:
-        print(gen.provider.adapt(a.prompt, category=a.category, date=dt.date.today(), variation="", avoid=[]))
+        print(gen.provider.adapt(a.prompt, category=a.category, date=dt.date.today(), variation="", avoid=[],
+                                 draw_text=a.draw_text))
         return
     w, h = (int(x) for x in a.size.lower().split("x"))
     try:
-        img = asyncio.run(gen.generate(a.prompt, width=w, height=h, kind="cli", category=a.category))
+        img = asyncio.run(gen.generate(a.prompt, width=w, height=h, kind="cli", category=a.category,
+                                       draw_text=a.draw_text))
     except ImageGenError as e:
         raise SystemExit(f"Не вдалося: {e}")
     print(json.dumps(img.meta(), ensure_ascii=False, indent=2))

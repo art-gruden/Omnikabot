@@ -6,8 +6,9 @@
   omnika   — ранкове привітання центру «Омніка» (пост);
   unity    — налаштування на день «Єдність сердець» (пост + фото дня ddmm.jpg).
 
-Оформлення працює двома шляхами: через GPT (враховує стиль попередніх постів)
-і локально (типографіка, абзаци, емодзі, хештеги), якщо ключа OpenAI немає.
+Оформлення працює двома шляхами: локально (типографіка, абзаци, емодзі, хештеги)
+і через модель (враховує стиль попередніх постів). Рубрики з local_first=True
+оформлюються локально завжди, а модель підключається кнопкою «Оформити з Gemini».
 """
 from __future__ import annotations
 
@@ -61,6 +62,9 @@ class Kind:
     hashtags: str = ""
     use_day_photo: bool = False
     compose: bool = False            # чи можна згенерувати текст із нуля
+    local_first: bool = False        # оформлювати локально, а модель — лише кнопкою
+    auto_image: bool = False         # одразу після тексту скласти промт і намалювати картинку
+    date_in_image: bool = False      # модель домальовує в кадрі сьогоднішню дату
 
 
 KINDS: dict[str, Kind] = {
@@ -98,13 +102,14 @@ KINDS: dict[str, Kind] = {
                "Структура: тепле звітання в першому рядку, далі 2–4 короткі абзаци по 1–3 речення, "
                "наприкінці світле побажання дня. Доречні емодзі на початку абзаців, не більше одного на абзац. "
                "Назву центру «Омніка» зберігай як у вхідному тексті."),
+        local_first=True, date_in_image=True,
         image_style="Ранкове сонце, світло крізь листя або хмари, тепла золотава гама, умиротворення.",
         image_style_en="Morning sun, light through leaves or clouds, warm golden palette, peaceful quiet landscape.",
         template="sunset", emojis=("☀️", "🌿", "💛", "🙏", "✨"),
     ),
     "unity": Kind(
         id="unity", name="Єдність сердець — налаштування на день", emoji="💗", output="post",
-        use_day_photo=True,
+        use_day_photo=True, auto_image=True,
         ask="Надішліть текст налаштування на день — я оформлю пост і додам фото на сьогодні.",
         rules=(COMMON_RULES + "\n\nЦе ранкове налаштування на день для спільноти «Єдність сердець». "
                "Структура: короткий заголовок-звертання, далі 2–4 абзаци по 1–3 речення — налаштування на день, "
@@ -146,11 +151,14 @@ def shorten_local(text: str, n: int = 25) -> str:
 _SENT = re.compile(r"(?<=[.!?…])\s+")
 
 
-def strip_markup(text: str) -> str:
-    """Прибирає розмітку, яку міг додати GPT (**жирний**, ## заголовки, — списки)."""
+def strip_markup(text: str, keep_bold: bool = False) -> str:
+    """Прибирає розмітку, яку могла додати модель (**жирний**, ## заголовки, — списки).
+
+    keep_bold=True лишає **зірочки**: з них робиться жирний текст Telegram (див. post_html)."""
     t = text.replace("\r\n", "\n").replace("\r", "\n")
     t = re.sub(r"^\s*#{1,6}\s*", "", t, flags=re.M)
-    t = re.sub(r"\*\*(.+?)\*\*", r"\1", t, flags=re.S)
+    if not keep_bold:
+        t = re.sub(r"\*\*(.+?)\*\*", r"\1", t, flags=re.S)
     t = re.sub(r"__(.+?)__", r"\1", t, flags=re.S)
     t = re.sub(r"(?m)^\s*[-*]\s+", "— ", t)
     t = re.sub(r"^\s*[«\"']|[»\"']\s*$", "", t.strip())
@@ -189,6 +197,42 @@ def local_format(kind: Kind, text: str, hashtags: str = "") -> str:
     return body
 
 
+def post_html(text: str) -> str:
+    """Текст посту -> HTML для Telegram: **фрагмент** стає жирним, решта екранується.
+
+    Кольору тексту в повідомленнях Telegram немає — колір може нести лише картинка."""
+    import html
+    out = html.escape(text, quote=False)
+    if out.count("**") % 2:                      # непарна кількість — розмітка побилася, прибираємо
+        out = out.replace("**", "")
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", out, flags=re.S)
+
+
+def plain(text: str) -> str:
+    """Текст без службових зірочок — для зразків стилю й для показу користувачеві."""
+    return re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.S)
+
+
+SEASONS_UK = {12: "зима", 1: "зима", 2: "зима", 3: "весна", 4: "весна", 5: "весна",
+              6: "літо", 7: "літо", 8: "літо", 9: "осінь", 10: "осінь", 11: "осінь"}
+
+
+def season_uk(d: dt.date | None = None) -> str:
+    """«17 листопада, пізня осінь» — для промтів, щоб сцена відповідала сезону."""
+    d = d or dt.date.today()
+    part = "початок" if d.day <= 10 else "середина" if d.day <= 20 else "кінець"
+    return f"{date_uk(d)}, {part} сезону «{SEASONS_UK[d.month]}»"
+
+
+def date_uk(d: dt.date | None = None) -> str:
+    d = d or dt.date.today()
+    return f"{d.day} {MONTHS_GEN[d.month - 1]}"
+
+
+MONTHS_GEN = ["січня", "лютого", "березня", "квітня", "травня", "червня",
+              "липня", "серпня", "вересня", "жовтня", "листопада", "грудня"]
+
+
 def local_image_prompt(kind: Kind, text: str) -> str:
     """Запасний промт для зображення, коли GPT недоступний (англійською, без тексту в кадрі)."""
     style = kind.image_style_en or "Soft spiritual light, calm atmosphere."
@@ -211,9 +255,14 @@ def style_block(profile: str, samples: list[str], limit: int = 3) -> str:
     return "\n\n".join(parts)
 
 
+MARKS_RULES = ("\n\nДодатково до правил вище: познач жирним головне послання посту. Обрами **двома зірочками** "
+               "з обох боків 1–3 короткі фрагменти (кілька слів, не цілий абзац) — саме ті, що несуть головну думку. "
+               "У Telegram вони стануть жирними. Це єдиний дозволений знак розмітки, інших не став.")
+
+
 def format_messages(kind: Kind, text: str, profile: str = "", samples: list[str] | None = None,
-                    extra: str = "") -> tuple[str, str]:
-    sys = kind.rules
+                    extra: str = "", marks: bool = False) -> tuple[str, str]:
+    sys = kind.rules + (MARKS_RULES if marks else "")
     block = style_block(profile, samples or [])
     if block:
         sys += "\n\n" + block
@@ -239,6 +288,30 @@ def image_prompt_messages(kind: Kind, text: str, extra: str = "") -> tuple[str, 
         sys += "\n\nДодаткові побажання автора: " + extra
     return sys, ("Склади промт для фонового зображення до такого україномовного посту "
                  "(перекажи його настрій образами, не словами):\n\n" + text.strip()[:1500])
+
+
+IMAGE_FROM_TEXT = """Ти складаєш промт англійською для генератора зображень Gemini до україномовного посту.
+Спершу визнач для себе послання (головну думку) і настрій дня з тексту, а тоді опиши сцену, яка передає їх образами, а не словами.
+Залізні правила:
+— Опиши конкретну сцену: місце, час доби, світло, кольори, предмети, композицію, настрій.
+— Пора року має відповідати сьогоднішній даті. {season}
+— Горизонтальний кадр 16:9; верхня частина кадру — спокійна й малодеталізована (туди ляже напис).
+— Без людей великим планом і без облич, без брендів і логотипів.
+— НЕ пиши в промті жодних написів, цитат, імен і дат: написи додаються окремо.
+— 60–110 слів, один абзац, англійською.
+У відповідь дай ТІЛЬКИ промт англійською, без пояснень і без лапок."""
+
+
+def image_from_text_messages(kind: Kind, text: str, season: str = "", previous: str = "") -> tuple[str, str]:
+    """Запит до моделі: за текстом посту скласти (або оновити) промт для генератора зображень."""
+    sys = IMAGE_FROM_TEXT.format(season=f"Сьогодні {season}." if season else "")
+    if kind.image_style:
+        sys += "\n\nБажаний настрій і стиль рубрики: " + kind.image_style
+    user = "Текст посту:\n\n" + plain(text).strip()[:1500]
+    if previous:
+        user += ("\n\nПопередній промт був таким — склади відчутно іншу сцену (інше місце, інша композиція, "
+                 "інший головний предмет), але з тим самим посланням:\n\n" + previous.strip()[:900])
+    return sys, user
 
 
 IMAGE_THEME = """Ти допомагаєш підібрати ілюстрацію до україномовного посту. Прочитай текст і дай рівно два рядки англійською:

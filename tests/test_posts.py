@@ -28,7 +28,10 @@ PHOTOS = DATA / "photos"
 PHOTOS.mkdir(parents=True)
 os.environ["DATA_DIR"] = str(DATA)
 os.environ["PHOTOS_DIR"] = str(PHOTOS)
+os.environ["AUTO_IMAGE"] = "0"       # автокартинку для «Єдності сердець» перевіряє tests/test_gemini.py
 os.environ.pop("ADMIN_IDS", None)
+for _v in ("GEMINI_API_KEY", "IMAGE_PROVIDER", "TEXT_PROVIDER"):
+    os.environ.pop(_v, None)
 os.environ.pop("OPENAI_API_KEY", None)
 
 from PIL import Image  # noqa: E402
@@ -162,7 +165,7 @@ async def scenario(cb):
     m = fake.mark()
     fake.press(A, posts, btn(posts, "Омніка"))
     ask = cur(await wait(m, is_("sendMessage", A, "Надішліть текст")))
-    check("Ключ OpenAI не заданий" in ask["text"], "підказка про просте оформлення")
+    check("Потрібен ключ OpenAI" in ask["text"], "підказка про просте оформлення")
     m = fake.mark()
     fake.send_text(A, OMNIKA_TEXT)
     calls = await settle(m)
@@ -220,18 +223,29 @@ async def scenario(cb):
     check(cb.oai_cfg()["image_model"] == "gpt-image-1-mini", "модель зображень збережено")
     await press(A, mm, "o:setmodel:image:gpt-image-1.5")
 
-    print("5. «Омніка» з ChatGPT: оформлення в стилі зразків")
+    print("5. «Омніка»: текст простими засобами, далі кнопка «Оформити з ChatGPT»")
     cb.db.add_sample("omnika", "Доброго ранку, рідні! ☀️ Сьогодні день тиші. Бережіть себе.", A)
     cb.db.add_sample("omnika", "Доброго ранку! 🌿 Нехай справи йдуть легко. Центр «Омніка» з вами.", A)
     n0 = oai.mark()
     m = fake.mark()
     fake.send_text(A, "/omnika " + OMNIKA_TEXT)
     calls = await settle(m)
+    local = [c for c in calls if is_("sendMessage", A)(c) and "ранку" in c["params"].get("text", "")]
+    check(local and not [c for c in oai.since(n0) if c["what"] == "chat"], "текст оформлено локально, без GPT")
+    lmsg = cur(local[0]) if local else None
+    check(lmsg and "Оформити з ChatGPT" in str(buttons(lmsg)), "під чернеткою є кнопка оформлення моделлю")
+    check(any(is_("sendMessage", A, "простими засобами")(c) for c in calls), "бот пояснює, як оформив")
+
+    n0 = oai.mark()
+    m = fake.mark()
+    fake.press(A, lmsg, btn(lmsg, "Оформити з ChatGPT"))
+    calls = await settle(m)
     chat_calls = [c for c in oai.since(n0) if c["what"] == "chat"]
     check(len(chat_calls) >= 2, f"виклики GPT: стиль + оформлення ({len(chat_calls)})")
     sys_prompts = " ".join(c["body"]["messages"][0]["content"] for c in chat_calls)
     check("Приклади попередніх постів" in sys_prompts, "зразки передано в промт")
     check("Опис стилю цієї рубрики" in sys_prompts, "профіль стилю передано")
+    check("двома зірочками" in sys_prompts, "правило виділяти головне жирним")
     check(all("max_tokens" not in c["body"] for c in chat_calls), "надіслано max_completion_tokens")
     post = [c for c in calls if is_("sendMessage", A)(c) and "Нехай цей день" in c["params"].get("text", "")]
     check(post, "пост від GPT надіслано")
@@ -464,7 +478,7 @@ async def scenario(cb):
     m = fake.mark()
     fake.send_text(A, "/omnika " + OMNIKA_TEXT)
     calls = await settle(m)
-    post = [c for c in calls if is_("sendMessage", A)(c) and "Нехай цей день" in c["params"].get("text", "")]
+    post = [c for c in calls if is_("sendMessage", A)(c) and "ранку" in c["params"].get("text", "")]
     m = fake.mark()
     fake.press(A, cur(post[0]), btn(cur(post[0]), "Промт картинки"))
     fb = cur(await wait(m, is_("sendMessage", A, "Промт для генератора")))
@@ -522,14 +536,19 @@ async def scenario(cb):
     fake.send_text(A, "коротше, без води")
     await settle(m)
     check(cb.post_cfg("omnika")["extra"] == "коротше, без води", "побажання збережено")
-    n0 = oai.mark()
     m = fake.mark()
     fake.send_text(A, "/omnika " + OMNIKA_TEXT)
     calls = await settle(m)
+    post = [c for c in calls if c["method"] == "sendMessage" and "ранку" in c["params"].get("text", "")]
+    check(post and "#омніка" in post[0]["params"]["text"], "хештеги додано до посту й при локальному оформленні")
+    n0 = oai.mark()
+    m = fake.mark()
+    fake.press(A, cur(post[0]), btn(cur(post[0]), "Оформити з ChatGPT"))
+    calls = await settle(m)
     sysmsg = [x["body"]["messages"][0]["content"] for x in oai.since(n0) if x["what"] == "chat"]
     check(any("коротше, без води" in s for s in sysmsg), "побажання передано в GPT")
-    post = [c for c in calls if c["method"] == "sendMessage" and "Нехай цей день" in c["params"].get("text", "")]
-    check(post and "#омніка" in post[0]["params"]["text"], "хештеги додано до посту")
+    gpt_post = [c for c in calls if c["method"] == "sendMessage" and "Нехай цей день" in c["params"].get("text", "")]
+    check(gpt_post and "#омніка" in gpt_post[0]["params"]["text"], "хештеги додано і при оформленні моделлю")
 
     print("16. Помилки OpenAI показуються зрозуміло")
     oai.fail_next["chat"] = (429, "Rate limit reached", 9)
@@ -580,7 +599,7 @@ async def scenario(cb):
     m = fake.mark()
     fake.send_text(B, "/omnika " + OMNIKA_TEXT)
     calls = await settle(m)
-    check(any(c["method"] == "sendMessage" and "Нехай цей день" in c["params"].get("text", "") for c in calls),
+    check(any(c["method"] == "sendMessage" and "ранку" in c["params"].get("text", "") for c in calls),
           "B отримав оформлений пост")
 
     print("19. Усе переживає перезапуск")

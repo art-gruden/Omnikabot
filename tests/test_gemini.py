@@ -34,6 +34,7 @@ os.environ.update({
     "IMAGE_PROVIDER": "gemini", "GEMINI_API_KEY": GKEY, "GEMINI_MODEL": "nano-banana-2-1k",
     "GEMINI_BASE_URL": f"http://127.0.0.1:{G_PORT}/v1beta",
     "GEMINI_TIMEOUT": "1.5", "IMAGE_RETRY_DELAY": "0.05", "GENERATED_IMAGES_KEEP": "6",
+    "GEMINI_TEXT_TIMEOUT": "10", "TEXT_RETRY_DELAY": "0.05",
 })
 for k in ("ADMIN_IDS", "OPENAI_API_KEY", "GEMINI_API", "GEMINI_IMAGE_SIZE", "IMAGE_ATTEMPTS", "IMAGE_BACKUP_DIR"):
     os.environ.pop(k, None)
@@ -45,6 +46,7 @@ from bot import gemini_prompt as GP  # noqa: E402
 from bot import image_gen as IG  # noqa: E402
 from bot import image_prompts as IP  # noqa: E402
 from bot import main as M  # noqa: E402
+from bot import text_gen as TX  # noqa: E402
 from bot.db import DB  # noqa: E402
 
 A = 5111
@@ -106,6 +108,30 @@ def unit():
     check(IG.provider_name() == "openai" and IG.make_provider(lambda: {}).name == "openai", "IMAGE_PROVIDER=openai перемикає назад")
     os.environ.update({k: v for k, v in saved.items() if v})
 
+    print("1b. Текстовий провайдер Gemini")
+    tp = TX.make_provider(lambda: {})
+    check(tp.name == "gemini" and tp.label == "Gemini" and tp.model == TX.DEFAULT_GEMINI_TEXT_MODEL
+          and tp.ready(), f"типова текстова модель: {tp.model}")
+    url, payload, inter = tp.request("СИСТЕМА", "ЗАПИТ", 500)
+    check(url.endswith("/models/gemini-3.5-flash:generateContent") and not inter, "адреса generateContent")
+    check(payload["systemInstruction"]["parts"][0]["text"] == "СИСТЕМА"
+          and payload["contents"][0]["parts"][0]["text"] == "ЗАПИТ", "системна інструкція й запит окремо")
+    check(payload["generationConfig"]["maxOutputTokens"] >= 1500, "запас токенів на «роздуми» моделі")
+    check("thinkingLevel" not in payload["generationConfig"], "рівень роздумів не нав'язуємо")
+    os.environ["GEMINI_THINKING"] = "low"
+    check(TX.GeminiTextProvider().request("s", "u", 100)[1]["generationConfig"]["thinkingLevel"] == "LOW",
+          "GEMINI_THINKING задає рівень роздумів")
+    os.environ.pop("GEMINI_THINKING")
+    os.environ["GEMINI_API"] = "interactions"
+    url, payload, inter = TX.GeminiTextProvider().request("СИСТЕМА", "ЗАПИТ", 500)
+    check(inter and url.endswith("/interactions") and payload["system_instruction"] == "СИСТЕМА"
+          and payload["input"] == "ЗАПИТ", "режим interactions")
+    os.environ.pop("GEMINI_API")
+    os.environ["TEXT_PROVIDER"] = "openai"
+    check(TX.make_provider(lambda: {"key": "", "text_model": "gpt-5.4-mini"}).name == "openai",
+          "TEXT_PROVIDER=openai перемикає на OpenAI")
+    os.environ["TEXT_PROVIDER"] = "gemini"
+
     print("2. Адаптер промту для Gemini")
     lib = IP.load_library()
     day = dt.date(2026, 11, 17)
@@ -148,6 +174,29 @@ def unit():
 
 
 # ---------------------------------------------------------------- 2. провайдер і генератор
+
+async def text_tests():
+    tp = TX.GeminiTextProvider()
+    gem.text_script = [("thought",)]
+    n = gem.mark()
+    out = await tp.chat("Ти редактор. Оформи текст.", "доброго ранку")
+    check(out == gem.text_reply and len(gem.of("text", n)) == 1, "текст отримано, «думки» моделі відкинуто")
+    gem.text_script = [("notext", "MAX_TOKENS"), ("status", 503, "overloaded")]
+    n = gem.mark()
+    try:
+        await tp.chat("sys", "user")
+        check(False, "порожня відповідь має дати помилку")
+    except TX.TextError as e:
+        check(len(gem.of("text", n)) == 2 and "503" in str(e), f"порожня відповідь → повтор, далі помилка: {e}")
+    gem.text_script = [("status", 400, "API key not valid. Please pass a valid API key.")]
+    n = gem.mark()
+    try:
+        await tp.chat("sys", "user")
+        check(False, "неправильний ключ має дати помилку")
+    except TX.TextError as e:
+        check(len(gem.of("text", n)) == 1 and "GEMINI_API_KEY" in str(e), "неправильний ключ не повторюємо")
+    gem.text_script.clear()
+
 
 async def provider_tests():
     db = DB(DATA / "unit.sqlite3")
@@ -334,90 +383,142 @@ def img_size(c):
     return Image.open(io.BytesIO(c["files"]["photo"][1])).size
 
 
+def sys_of(call) -> str:
+    b = call["body"]
+    if "system_instruction" in b:
+        return b["system_instruction"]
+    return " ".join(p.get("text", "") for p in (b.get("systemInstruction") or {}).get("parts", []))
+
+
 async def scenario(cb):
-    print("8. Бот із IMAGE_PROVIDER=gemini і без ключа OpenAI")
+    today = dt.date.today()
+    date_uk = IP.date_uk(today)
+
+    print("8. Обидва провайдери — Gemini, ключа OpenAI немає")
     m = fake.mark()
     fake.send_text(A, "/start")
     await settle(m)
-    check(cb.image_ready() and not cb.oai_ready() and cb.image_label() == "Gemini", "картинки готові без ключа OpenAI")
+    check(cb.text_ready() and cb.image_ready() and not cb.oai_ready(), "тексти й картинки працюють без OpenAI")
+    check((cb.text_label(), cb.text.model) == ("Gemini", "gemini-3.5-flash"), f"текстова модель: {cb.text.model}")
     m = fake.mark()
     fake.send_text(A, "/menu")
     mn = cur(await wait(m, is_("sendMessage", "Налаштування")))
     fake.press(A, mn, "m:admin")
     await asyncio.sleep(0.6)
-    check("Зображення малює: Gemini (gemini-3.1-flash-image, 1K)" in fake.messages[(A, mn["message_id"])]["text"],
-          "в адмін-меню видно провайдера й модель")
+    admin = fake.messages[(A, mn["message_id"])]["text"]
+    check("Тексти оформлює: Gemini (gemini-3.5-flash)" in admin
+          and "Зображення малює: Gemini (gemini-3.1-flash-image, 1K)" in admin, "в адмін-меню видно обидва провайдери")
 
-    print("9. Пост «Омніка»: текст оформлено локально, картинку малює Gemini")
+    print("9. «Омніка»: текст простими засобами, у картинці — сьогоднішня дата")
+    n = gem.mark()
     m = fake.mark()
     fake.send_text(A, "/omnika " + OMNIKA_TEXT)
     calls = await settle(m)
     post = cur([c for c in calls if is_("sendMessage")(c) and "ранку" in c["params"]["text"]][0])
-    check("Згенерувати картинку" in str(buttons(post)), "кнопка генерації є")
+    check(not gem.of("text", n), "текст оформлено без звернення до моделі")
+    check("☀️" in post["text"] and gem.text_reply not in post["text"] and OMNIKA_TEXT[:20] in post["text"].lower(),
+          "локальне оформлення: емодзі й абзаци, слова автора без змін")
+    check(any(is_("sendMessage", "простими засобами")(c) for c in calls), "бот пояснює, що оформив просто")
+    labels = [b["text"] for b in buttons(post)]
+    check(any("Оформити з Gemini" in t for t in labels) and any("Згенерувати картинку" in t for t in labels),
+          f"кнопки чернетки: {labels}")
+
     n = gem.mark()
     m = fake.mark()
     fake.press(A, post, btn(post, "Згенерувати картинку"))
-    c = await wait(m, is_("sendPhoto"), label="ілюстрація")
-    check(img_size(c) == (1376, 768) and "Картинка до посту" in c["params"].get("caption", ""), f"ілюстрація 16:9 {img_size(c)}")
-    check(any(is_("sendMessage", "через Gemini")(x) for x in fake.since(m)), "повідомлення «Малюю через Gemini»")
-    call = gem.since(n)[0]
-    sent = prompt_of(call)
-    did = btn(post, "Промт картинки").split(":")[2]
-    d = cb.db.draft(did)
-    meta = json.loads(d["extra"])["ip"]
-    cat = IP.load_library()[meta["id"]]["category_id"]
-    check(cat in IP.KIND_CATEGORIES["omnika"] and GP.CATEGORY_RULES[cat] in sent and GP.GEMINI_BASE in sent,
-          f"готовий промт рубрики + блоки Gemini (категорія {cat})")
-    check(not CYR.search(sent) and dt.date.today().isoformat() not in sent, "у запиті до Gemini немає кирилиці й дати цифрами")
-    check(IP.date_uk(dt.date.today()) in d["prompt"], "сам промт у чернетці не змінено (для ChatGPT і копіювання)")
-    check(call["body"]["generationConfig"]["imageConfig"] == {"aspectRatio": "16:9", "imageSize": "1K"}, "16:9, 1K")
-    row = cb.db.image_last(A)
-    check(row["status"] == "ok" and row["kind"] == "omnika" and row["prompt_id"] == meta["id"] and Path(row["path"]).is_file()
-          and Path(row["path"]).parent == DATA / "generated", "файл збережено в /data/generated, історію записано")
-    check(cb.db.usage_count(A, "image") == 1, "генерацію враховано в денному ліміті")
+    c = await wait(m, is_("sendPhoto"), timeout=40, label="картинка до посту")
+    img_call = gem.of("image", n)[0]
+    sent = prompt_of(img_call)
+    check(len(gem.of("image", n)) == 1 and img_size(c) == (1376, 768), f"одна картинка 16:9 {img_size(c)}")
+    check(f"«{date_uk}»" in sent and "Render this text exactly once" in sent, f"у промті напис «{date_uk}»")
+    check(GP.date_draw_style(today) in sent, "стиль напису (розмір, шрифт, колір) — сьогоднішній")
+    check(GP.date_draw_style(today) != GP.date_draw_style(today + dt.timedelta(days=1)), "завтра стиль буде інший")
+    check(c["params"].get("caption") == post["text"], "під картинкою — той самий оформлений текст посту")
+    check(any(is_("sendMessage", "Напис у кадрі: " + date_uk)(x) for x in fake.since(m)), "бот каже, що написано в кадрі")
+    check(cb.db.image_last(A)["status"] == "ok", "генерацію записано в історію")
 
-    print("10. Листівка «Ранкове завантаження»: фон від Gemini, текст поверх")
+    print("9b. Друге натискання: спершу модель оновлює промт")
+    n = gem.mark()
     m = fake.mark()
-    fake.send_text(A, "/morning Нехай світло наповнює мої думки, слова та вчинки щодня.")
-    card = (await wait(m, is_("sendPhoto"), label="листівка"))["result"]
+    fake.press(A, post, btn(post, "Згенерувати картинку"))
+    await wait(m, is_("sendPhoto"), timeout=40, label="друга картинка")
+    texts = [c for c in gem.of("text", n) if "генератора зображень gemini" in sys_of(c).lower()]
+    check(len(texts) == 1, "один запит на оновлення промту")
+    check(OMNIKA_TEXT[:25] in prompt_of(texts[0]) and "Попередній промт" in prompt_of(texts[0]),
+          "у запиті — текст посту й попередній промт")
+    check(any(is_("sendMessage", "Оновлюю промт картинки (Gemini)")(x) for x in fake.since(m)), "бот каже, що оновлює промт")
+    new_prompt = prompt_of(gem.of("image", n)[0])
+    check(new_prompt.startswith(gem.from_text_reply[:40]), "малюємо вже за оновленим промтом")
+    check(f"«{date_uk}»" in new_prompt, "дата в кадрі лишається")
+
+    print("9c. Кнопка «Оформити з Gemini»: головне — жирним")
+    n = gem.mark()
+    m = fake.mark()
+    fake.press(A, post, btn(post, "Оформити з Gemini"))
+    fmt = cur(await wait(m, lambda c: is_("sendMessage")(c) and "<b>" in (c["params"].get("text") or ""),
+                         timeout=30, label="оформлений текст"))
+    call = gem.of("text", n)[0]
+    check("двома зірочками" in sys_of(call), "у запиті — правило про виділення головного")
+    check(fmt["text"] == "Доброго ранку, друзі! ☀️\n\n<b>Нехай цей день буде світлим.</b>\n\n💛 Усмішки вам і тепла.",
+          "жирним виділено головне послання")
+    check([c for c in fake.since(m) if c["method"] == "sendMessage"
+           and c["params"].get("text") == fmt["text"]][0]["params"].get("parse_mode") == "HTML", "надіслано як HTML")
+    await wait(m, is_("sendMessage", "Оформлено з Gemini"), timeout=20, label="примітка про оформлення")
+    check(True, "бот каже, хто оформив")
+    post = fmt                      # кнопки лишилися на новій чернетці
+
+    print("10. «Ранкове завантаження»: листівку малює внутрішній рендер")
     tpl_before = len(cb.store.all())
     n = gem.mark()
     m = fake.mark()
-    fake.press(A, card, btn(card, "Згенерувати картинку"))
-    c = await wait(m, is_("sendPhoto", "Новий фон від Gemini"), timeout=40, label="листівка на новому фоні")
-    check(img_size(c) == (1280, 782), f"розмір листівки не змінився {img_size(c)}")
-    sent = prompt_of(gem.since(n)[0])
-    check(GP.CATEGORY_RULES["affirmation"] in sent and GP.OVERRIDE_NOTE in sent, "фон афірмації: правило спокійного центру")
-    check(gem.since(n)[0]["body"]["generationConfig"]["imageConfig"]["aspectRatio"] == "16:9", "для 1280×782 просимо 16:9")
-    check(len(cb.store.all()) == tpl_before + 1, "фон збережено як шаблон (як і раніше)")
+    fake.send_text(A, "/morning Нехай світло наповнює мої думки, слова та вчинки щодня.")
+    card = (await wait(m, is_("sendPhoto"), timeout=30, label="листівка"))["result"]
+    c = [x for x in fake.since(m) if x["method"] == "sendPhoto"][0]
+    check(img_size(c) == (1280, 782) and not gem.of("image", n), "листівка зроблена без генератора зображень")
+    check(any("Картинка з текстом у Gemini" in b["text"] for b in buttons(card)), "є кнопка перегенерації в Gemini")
 
-    print("11. Звичайна листівка: кнопка нового фону")
+    n = gem.mark()
     m = fake.mark()
-    fake.send_text(A, "Я відкриваю своє серце присутності Творця і світлу нового дня.")
-    plain = (await wait(m, is_("sendPhoto")))["result"]
-    check("Новий фон через Gemini" in str(buttons(plain)), "підпис кнопки називає Gemini")
+    fake.press(A, card, btn(card, "Картинка з текстом"))
+    c = await wait(m, is_("sendPhoto"), timeout=40, label="картинка з текстом")
+    sent = prompt_of(gem.of("image", n)[0])
+    check("ЕНЕРГОЗАВАНТАЖЕННЯ" in sent and "Нехай цей день буде світлим" in sent, "у промті заголовок і текст листівки")
+    check("overrides the rules above that forbid text" in sent, "заборону тексту знято саме для цього напису")
+    check("in the middle of the image" in sent, "напис — у центрі кадру")
+    check(img_size(c) == (1376, 768) and "Напис у кадрі" in (c["params"].get("caption") or ""),
+          "надіслано саме картинку від Gemini")
+    check(len(cb.store.all()) == tpl_before, "картинка з текстом не стає шаблоном листівки")
+
+    print("11. «Єдність сердець»: промт із тексту посту, картинка одразу")
+    n = gem.mark()
     m = fake.mark()
-    fake.press(A, plain, "r:bg")
-    c = await wait(m, is_("sendPhoto"), timeout=40)
-    check(img_size(c) == (1280, 782), "листівку перемальовано на фоні від Gemini")
+    fake.send_text(A, "/unity Сьогодні день вдячності. Прислухайтесь до серця і подякуйте за те, що вже є.")
+    c = await wait(m, is_("sendPhoto"), timeout=45, label="пост із картинкою")
+    from_text = [x for x in gem.of("text", n) if "генератора зображень gemini" in sys_of(x).lower()]
+    check(len(from_text) == 1 and gem.text_reply[:25] in prompt_of(from_text[0]),
+          "промт складено за оформленим текстом посту")
+    check("Попередній промт" not in prompt_of(from_text[0]), "перший раз — без попереднього промту")
+    check(prompt_of(gem.of("image", n)[0]).startswith(gem.from_text_reply[:40]), "малюємо за цим промтом")
+    check(c["params"].get("caption") == gem.text_reply, "під картинкою — оформлений текст посту")
+    check(any(is_("sendMessage", "Складаю промт картинки (Gemini)")(x) for x in fake.since(m)), "бот каже, що складає промт")
+    check(img_size(c) == (1376, 768), f"картинка 16:9 {img_size(c)}")
 
     print("12. Три невдалі спроби: запасна картинка або безпечна зупинка")
     gem.script = [("status", 503, "The model is overloaded")] * 3
     n = gem.mark()
     m = fake.mark()
     fake.press(A, post, btn(post, "Згенерувати картинку"))
-    await wait(m, is_("sendMessage", "Запасної картинки немає"), label="немає запасної")
-    check(len(gem.since(n)) == 3, "рівно три спроби")
+    await wait(m, is_("sendMessage", "Запасної картинки немає"), timeout=40, label="немає запасної")
+    check(len(gem.of("image", n)) == 3, "рівно три спроби")
     check(any(is_("sendMessage", "тимчасово недоступний (503)")(x) for x in fake.since(m)), "причину показано користувачеві")
     check(not any(x["method"] == "sendPhoto" for x in fake.since(m)), "без запасної картинки нічого не надсилаємо")
 
-    today = dt.date.today()
     Image.new("RGB", (1200, 800), (120, 60, 140)).save(PHOTOS / f"{today.day:02d}{today.month:02d}.jpg", "JPEG")
     gem.script = [("status", 503, "The model is overloaded")] * 3
     used_before = cb.db.usage_count(A, "image")
     m = fake.mark()
     fake.press(A, post, btn(post, "Згенерувати картинку"))
-    c = await wait(m, is_("sendPhoto", "Запасна картинка"), label="запасна картинка")
+    c = await wait(m, is_("sendPhoto", "Запасна картинка"), timeout=40, label="запасна картинка")
     check(f"{today.day:02d}{today.month:02d}.jpg" in c["params"]["caption"] and img_size(c) == (1200, 800),
           "надіслано фото дня як запасну картинку")
     check(cb.db.image_last(A)["status"] == "backup" and cb.db.usage_count(A, "image") == used_before,
@@ -426,15 +527,26 @@ async def scenario(cb):
     gem.script = [("status", 503, "x")] * 3
     m = fake.mark()
     fake.press(A, card, btn(card, "Згенерувати картинку"))
-    await wait(m, is_("sendMessage", "Листівка лишається на поточному фоні"), label="листівка без змін")
+    await wait(m, is_("sendMessage", "Листівка лишається на поточному фоні"), timeout=40, label="листівка без змін")
     check(not any(x["method"] == "sendPhoto" for x in fake.since(m)), "листівку не чіпаємо")
     check(not gem.script, "сценарій помилок вичерпано рівно трьома спробами")
 
-    print("13. Після збою наступна генерація працює")
+    print("13. Текстові збої: бот не лишає користувача без результату")
+    gem.text_script = [("status", 503, "overloaded"), ("status", 503, "overloaded")]
+    m = fake.mark()
+    fake.press(A, post, btn(post, "Оформити з Gemini"))
+    await wait(m, is_("sendMessage", "Оформив простими засобами"), timeout=30, label="запасне оформлення")
+    calls = await settle(m, timeout=30)
+    check(True, "модель недоступна — оформлення простими засобами")
+    again_msgs = [x for x in calls if is_("sendMessage")(x) and "ранку" in (x["params"].get("text") or "")]
+    check(again_msgs, "текст усе одно показано")
+    gem.text_script.clear()
+
+    post = cur(again_msgs[0])
     m = fake.mark()
     fake.press(A, post, btn(post, "Згенерувати картинку"))
-    c = await wait(m, is_("sendPhoto", "Картинка до посту"), label="знову працює")
-    check(img_size(c) == (1376, 768), "нова ілюстрація після збою")
+    c = await wait(m, is_("sendPhoto"), timeout=40, label="знову працює")
+    check(img_size(c) == (1376, 768), "нова картинка після збоїв")
 
 
 async def amain():
@@ -442,6 +554,7 @@ async def amain():
     gem.start()
     unit()
     try:
+        await text_tests()
         await provider_tests()
     except Exception:
         traceback.print_exc()

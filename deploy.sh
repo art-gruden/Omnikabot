@@ -8,7 +8,7 @@
 #   ./deploy.sh doctor              перевірити налаштування й знайти проблему
 #   ./deploy.sh token | admins | openai | tz    змінити значення в .env
 #   ./deploy.sh gemini              задати ключ Gemini й малювати картинки через Gemini (Nano Banana 2)
-#   ./deploy.sh provider gemini|openai          хто малює картинки (IMAGE_PROVIDER)
+#   ./deploy.sh provider gemini|openai          хто оформлює тексти й малює картинки
 #   ./deploy.sh backup [тека] | restore ФАЙЛ
 #   ./deploy.sh autobackup on|off   щоденна резервна копія о 4:30 (systemd timer)
 #   ./deploy.sh uninstall           зупинити й видалити контейнер (дані лишаються)
@@ -161,10 +161,12 @@ env_set() {  # env_set KEY VALUE
     cat "$tmp" > "$ENV_FILE"; rm -f "$tmp"
 }
 
-set_gemini() {  # set_gemini KEY — ключ Gemini + провайдер зображень
+set_gemini() {  # set_gemini KEY — ключ Gemini + провайдери тексту й зображень
     env_set GEMINI_API_KEY "$1"
     env_set IMAGE_PROVIDER gemini
+    env_set TEXT_PROVIDER gemini
     [ -n "$(env_get GEMINI_MODEL)" ] || env_set GEMINI_MODEL nano-banana-2-1k
+    [ -n "$(env_get GEMINI_TEXT_MODEL)" ] || env_set GEMINI_TEXT_MODEL gemini-3.5-flash
 }
 
 valid_token() { [[ "$1" =~ ^[0-9]{5,12}:[A-Za-z0-9_-]{30,}$ ]]; }
@@ -200,7 +202,7 @@ ensure_env() {
 
     local gkey="${ARG_GEMINI:-$(env_get GEMINI_API_KEY)}"
     if [ -z "$gkey" ] && [ -z "${ARG_NO_ASK:-}" ]; then
-        echo "Ключ Gemini (малює картинки моделлю Nano Banana 2) беруть на aistudio.google.com → Get API key."
+        echo "Ключ Gemini (оформлює тексти й малює картинки Nano Banana 2) беруть на aistudio.google.com → Get API key."
         if [ "$(ask 'Ввести ключ Gemini зараз? (y/n)' n)" = "y" ]; then
             gkey="$(ask_secret 'GEMINI_API_KEY')"
         fi
@@ -369,13 +371,22 @@ cmd_doctor() {
         [ "$perm" = "600" ] && ok ".env є, права $perm" || { warn ".env має права $perm — краще 600 (chmod 600 .env)"; }
         valid_token "$(env_get BOT_TOKEN)" && ok "BOT_TOKEN заповнений" || { echo "${RED}✖${OFF} BOT_TOKEN порожній або неправильний"; bad=1; }
         [ -n "$(env_get ADMIN_IDS)" ] && ok "ADMIN_IDS: $(env_get ADMIN_IDS)" || warn "ADMIN_IDS порожній — адміном стане перший користувач"
-        [ -n "$(env_get OPENAI_API_KEY)" ] && ok "Ключ OpenAI заданий у .env" || warn "Ключа OpenAI у .env немає (можна ввести в меню бота)"
+        if [ -n "$(env_get OPENAI_API_KEY)" ]; then ok "Ключ OpenAI заданий у .env"
+        elif [ -n "$(env_get GEMINI_API_KEY)" ]; then ok "Ключа OpenAI немає — він і не потрібен, усе робить Gemini"
+        else warn "Ключів немає: бот оформлюватиме тексти просто й не малюватиме картинок"; fi
         local prov; prov="$(env_get IMAGE_PROVIDER)"
         if [ "$prov" = "gemini" ]; then
             [ -n "$(env_get GEMINI_API_KEY)" ] && ok "Зображення: Gemini, модель $(env_get GEMINI_MODEL)" \
                 || warn "IMAGE_PROVIDER=gemini, але GEMINI_API_KEY порожній — картинки не малюватимуться (./deploy.sh gemini)"
         else
             ok "Зображення: ${prov:-openai} (перемкнути: ./deploy.sh provider gemini)"
+        fi
+        local tprov; tprov="$(env_get TEXT_PROVIDER)"
+        if [ "$tprov" = "gemini" ]; then
+            [ -n "$(env_get GEMINI_API_KEY)" ] && ok "Тексти: Gemini, модель $(env_get GEMINI_TEXT_MODEL)" \
+                || warn "TEXT_PROVIDER=gemini, але GEMINI_API_KEY порожній — тексти оформлюватимуться просто"
+        else
+            ok "Тексти: ${tprov:-openai} (перемкнути: ./deploy.sh provider gemini)"
         fi
         ok "Часовий пояс: $(env_get TZ)"
     else echo "${RED}✖${OFF} немає .env — запустіть ./deploy.sh"; bad=1; fi
@@ -433,7 +444,9 @@ case "${CMD:-install}" in
                  ok "Ключ Gemini збережено в .env; зображення малює Gemini ($(env_get GEMINI_MODEL))." ;;
     provider)    p="${1:-}"; case "$p" in gemini|openai) ;; *) die "Вкажіть провайдера: ./deploy.sh provider gemini|openai" ;; esac
                  [ "$p" != "gemini" ] || [ -n "$(env_get GEMINI_API_KEY)" ] || die "Спершу задайте ключ: ./deploy.sh gemini"
-                 env_set IMAGE_PROVIDER "$p"; fix_docker_access; compose up -d; ok "IMAGE_PROVIDER=$p" ;;
+                 env_set IMAGE_PROVIDER "$p"; env_set TEXT_PROVIDER "$p"
+                 fix_docker_access; compose up -d
+                 ok "IMAGE_PROVIDER=$p, TEXT_PROVIDER=$p (у .env їх можна задати й окремо)" ;;
     tz)          z="${ARG_TZ:-$(ask 'Часовий пояс' "$(env_get TZ)")}"; env_set TZ "$z"; fix_docker_access; compose up -d; ok "TZ=$z" ;;
     backup)      cmd_backup "${1:-}" ;;
     restore)     cmd_restore "${1:-}" ;;

@@ -1,11 +1,19 @@
-"""Рубрики постів у боті: оформлення тексту (OpenAI), промти й генерація зображень.
+"""Рубрики постів у боті: оформлення тексту, промти й генерація зображень.
 
-Зображення малює провайдер із .env (IMAGE_PROVIDER=gemini|openai) — див. bot/image_gen.py.
+Провайдери задаються в .env: тексти — TEXT_PROVIDER (bot/text_gen.py), зображення — IMAGE_PROVIDER
+(bot/image_gen.py); типово обидва Gemini.
+
+Особливості рубрик:
+    omnika — текст оформлюється простими засобами, модель підключається кнопкою «Оформити з Gemini»;
+             у картинці модель домальовує сьогоднішню дату (розмір, шрифт і колір інші щодня);
+    morning — картка малюється внутрішнім рендером, а кнопка «Картинка з текстом» віддає її Gemini;
+    unity  — промт картинки складається з тексту посту, картинка малюється одразу.
 
 Підмішується до CardBot (bot/main.py): екрани меню, стани введення, обробники кнопок.
 Префікси callback_data:
     pm:  — меню рубрик і налаштування рубрики
-    p:   — дії над чернеткою поста (зокрема промт картинки: p:prompt, p:newp, p:copy, p:editp, p:gen)
+    p:   — дії над чернеткою поста: p:prompt, p:newp, p:copy, p:editp, p:gen (картинка),
+           p:fmt (оформити текст моделлю), p:gentext (картинка з текстом усередині)
     o:   — налаштування OpenAI
     sm:  — зразки постів (аналіз стилю)
 """
@@ -28,15 +36,18 @@ from telegram.error import BadRequest
 from textcard import render as R
 
 from . import content as C
+from . import gemini_prompt as GP
 from . import image_gen as IG
 from . import image_prompts as IP
 from . import openai_api as O
+from . import text_gen as TX
 
 log = logging.getLogger("textcard-bot.posts")
 
 IMAGE_LIMIT = int(os.environ.get("IMAGE_LIMIT_PER_DAY", "20"))
 GENERATED_KEEP = int(os.environ.get("GENERATED_TEMPLATES_KEEP", "20"))
 MAX_POST_CHARS = int(os.environ.get("MAX_POST_CHARS", "3000"))
+AUTO_IMAGE = os.environ.get("AUTO_IMAGE", "1").strip().lower() not in ("0", "off", "no", "")
 
 
 def esc(s) -> str:
@@ -65,6 +76,23 @@ class PostsMixin:
 
     def oai_ready(self) -> bool:
         return bool(self.oai_cfg()["key"])
+
+    @property
+    def text(self) -> TX.TextProvider:
+        """Текстова модель: оформлення постів, промти, опис стилю (TEXT_PROVIDER у .env)."""
+        if getattr(self, "_text", None) is None:
+            self._text = TX.make_provider(self.oai_cfg)
+        return self._text
+
+    def text_ready(self) -> bool:
+        return self.text.ready()
+
+    def text_label(self) -> str:
+        return self.text.label
+
+    def text_status(self) -> str:
+        p = self.text
+        return f"✍️ Тексти оформлює: {p.label} ({p.model})" + ("" if p.ready() else " — ключ не заданий")
 
     @property
     def images(self) -> IG.ImageGenerator:
@@ -104,12 +132,12 @@ class PostsMixin:
         n = self.db.samples_count(kind_id)
         if not rebuild and saved.get("profile") and saved.get("n") == n:
             return saved["profile"]
-        if n < 2 or not self.oai_ready():
+        if n < 2 or not self.text_ready():
             return saved.get("profile", "") if not rebuild else ""
         sys, user = C.style_profile_messages(kind, [r["text"] for r in rows])
         try:
-            profile = C.strip_markup(await self.oai().chat(sys, user, max_tokens=700))
-        except O.OpenAIError as e:
+            profile = C.strip_markup(await self.text.chat(sys, user, max_tokens=700))
+        except TX.TextError as e:
             log.info("не вдалося описати стиль %s: %s", kind_id, e)
             return saved.get("profile", "")
         self.db.kv_set(f"style:{kind_id}", {"profile": profile, "n": n, "updated": time.time()})
@@ -118,19 +146,26 @@ class PostsMixin:
     # ------------------------------------------------------------ побудова тексту й промту
 
     async def build_text(self, uid: int, kind_id: str, source: str, *, compose: bool = False,
-                         extra: str = "") -> tuple[str, bool]:
-        """Повертає (оформлений текст, чи використано GPT)."""
+                         extra: str = "", marks: bool = False) -> tuple[str, bool]:
+        """Повертає (оформлений текст, чи використано модель).
+
+        Рубрики з local_first оформлюються простими засобами; модель вмикає лише marks=True
+        (кнопка «Оформити з Gemini») або compose=True."""
         kind = C.KINDS[kind_id]
-        if not self.oai_ready():
+        if kind.local_first and not compose and not marks:
+            return C.local_format(kind, source, self.post_cfg(kind_id).get("hashtags", "")), False
+        if not self.text_ready():
             if compose:
-                raise O.OpenAIError("Щоб складати тексти, потрібен ключ OpenAI: "
-                                    "🛠 Адміністрування → 🤖 OpenAI. Поки що надішліть свій текст — я його оформлю.")
+                raise TX.TextError(f"Щоб складати тексти, потрібен ключ: {self.text.not_ready_hint()}. "
+                                   "Поки що надішліть свій текст — я його оформлю.")
             return C.local_format(kind, source, self.post_cfg(kind_id).get("hashtags", "")), False
         profile = await self.style_profile(kind_id)
         samples = [r["text"] for r in self.db.samples(kind_id, 3)]
-        mk = C.compose_messages if compose else C.format_messages
-        sys, user = mk(kind, source, profile, samples, extra)
-        out = C.strip_markup(await self.oai().chat(sys, user, max_tokens=1500))
+        if compose:
+            sys, user = C.compose_messages(kind, source, profile, samples, extra)
+        else:
+            sys, user = C.format_messages(kind, source, profile, samples, extra, marks=marks)
+        out = C.strip_markup(await self.text.chat(sys, user, max_tokens=1500), keep_bold=marks)
         if kind.output == "post":
             tags = self.post_cfg(kind_id).get("hashtags", "").strip()
             if tags and tags.lower() not in out.lower():
@@ -141,12 +176,12 @@ class PostsMixin:
     async def build_prompt(self, uid: int, kind_id: str, text: str, extra: str = "") -> tuple[str, bool]:
         """Запасний шлях: промт складає GPT (або локальний шаблон). Працює, якщо бібліотека промтів недоступна."""
         kind = C.KINDS[kind_id]
-        if not self.oai_ready():
+        if not self.text_ready():
             return C.local_image_prompt(kind, text), False
         sys, user = C.image_prompt_messages(kind, text, extra)
         try:
-            p = C.strip_markup(await self.oai().chat(sys, user, max_tokens=600))
-        except O.OpenAIError as e:
+            p = C.strip_markup(await self.text.chat(sys, user, max_tokens=600))
+        except TX.TextError as e:
             log.info("промт через GPT не вийшов: %s", e)
             return C.local_image_prompt(kind, text), False
         self.db.add_usage(uid, "text")
@@ -156,22 +191,47 @@ class PostsMixin:
 
     async def image_theme(self, uid: int, kind_id: str, text: str) -> tuple[str, str]:
         """(тема, символ) англійською для готового промту. Без ключа OpenAI або при помилці — порожні."""
-        if not self.oai_ready() or not text.strip():
+        if not self.text_ready() or not text.strip():
             return "", ""
         try:
-            reply = await self.oai().chat(*C.image_theme_messages(C.KINDS[kind_id], text), max_tokens=300)
-        except O.OpenAIError as e:
+            reply = await self.text.chat(*C.image_theme_messages(C.KINDS[kind_id], text), max_tokens=300)
+        except TX.TextError as e:
             log.info("тему картинки через GPT не визначено: %s", e)
             return "", ""
         self.db.add_usage(uid, "text")
         return IP.parse_theme_reply(reply)
 
-    async def ensure_prompt(self, uid: int, did: str, *, renew: bool = False) -> str:
-        """Промт картинки для чернетки. Бере готовий промт рубрики з prompts/*.json і підставляє дату,
-        сезон і тему посту. renew=True — наступний варіант. Обраний промт зберігається в чернетці."""
+    async def prompt_from_text(self, uid: int, d, previous: str = "") -> str:
+        """Промт картинки, складений моделлю за текстом посту: послання й настрій дня -> сцена.
+
+        previous — попередній промт, щоб нова сцена була відчутно іншою. Порожньо, якщо не вийшло."""
+        text = d["text"] or d["source"]
+        if not self.text_ready() or not text.strip():
+            return ""
+        sys, user = C.image_from_text_messages(C.KINDS[d["kind"]], text, C.season_uk(), previous)
+        try:
+            reply = await self.text.chat(sys, user, max_tokens=500)
+        except TX.TextError as e:
+            log.info("промт із тексту посту не вийшов: %s", e)
+            return ""
+        self.db.add_usage(uid, "text")
+        return C.strip_markup(reply).strip()[:1800]
+
+    async def ensure_prompt(self, uid: int, did: str, *, renew: bool = False, from_text: bool = False) -> str:
+        """Промт картинки для чернетки. from_text=True — модель складає промт за текстом посту,
+        інакше береться готовий промт рубрики з prompts/*.json із підстановкою дати, сезону й теми.
+        renew=True — наступний варіант. Обраний промт зберігається в чернетці."""
         d = self.db.draft(did)
-        if d["prompt"] and not renew:
+        if d["prompt"] and not renew and not from_text:
             return d["prompt"]
+        if from_text:
+            fresh_prompt = await self.prompt_from_text(uid, d, previous=d["prompt"] if renew else "")
+            if fresh_prompt:
+                fresh = json.loads(self.db.draft(did)["extra"] or "{}")
+                fresh.pop("own", None)
+                fresh["ip"] = {"id": "", "title": f"Промт за текстом посту ({self.text_label()})"}
+                self.db.update_draft(did, prompt=fresh_prompt, extra=fresh)
+                return fresh_prompt
         extra = json.loads(d["extra"] or "{}")
         meta = extra.get("ip") or {}
         kind_id = d["kind"]
@@ -192,7 +252,8 @@ class PostsMixin:
             self.db.update_draft(did, prompt=prompt, extra=fresh)
             return prompt
         self.db.add_prompt_log(kind_id, ip.prompt_id, ip.anchor, uid)
-        fresh = json.loads(self.db.draft(did)["extra"] or "{}")     # за час запиту до GPT чернетку могли змінити
+        fresh = json.loads(self.db.draft(did)["extra"] or "{}")     # за час запиту чернетку могли змінити
+        fresh.pop("own", None)
         fresh["ip"] = {"id": ip.prompt_id, "title": ip.title, "theme": meta["theme"], "symbol": meta["symbol"]}
         self.db.update_draft(did, prompt=ip.prompt, extra=fresh)
         return ip.prompt
@@ -231,14 +292,16 @@ class PostsMixin:
                     self.db.kv_set("chatgpt_url_limit", IP.SAFE_BUTTON_URL)
 
     async def gen_image(self, uid: int, prompt: str, width: int, height: int, *, kind: str = "",
-                        prompt_id: str = "", category: str = "") -> IG.GeneratedImage:
+                        prompt_id: str = "", category: str = "", draw_text: str = "",
+                        draw_style: str = "") -> IG.GeneratedImage:
         """Одне зображення за промтом через вибраний провайдер: збережений файл + метадані."""
         cfg = self.oai_cfg()
         if self.image_quota_left(uid) <= 0:
             raise IG.ImageGenError(f"Вичерпано денний ліміт генерацій зображень ({cfg['limit']} на добу). "
                                    "Ліміт змінюється в 🛠 Адміністрування → 🤖 OpenAI.", fallback_ok=False)
         img = await self.images.generate(prompt, width=width, height=height, uid=uid, kind=kind,
-                                         prompt_id=prompt_id, category=category, quality=cfg.get("quality", "high"))
+                                         prompt_id=prompt_id, category=category, quality=cfg.get("quality", "high"),
+                                         draw_text=draw_text, draw_style=draw_style)
         self.db.add_usage(uid, "image")
         return img
 
@@ -310,9 +373,10 @@ class PostsMixin:
             rows = [[(f"{k.emoji} {k.name}", f"pm:go:{k.id}")] for k in (C.KINDS[i] for i in C.ORDER)]
             rows.append([("⚙️ Налаштування рубрик", "m:kinds")])
             rows.append(back)
-            gpt = "✅ підключений" if self.oai_ready() else "⚠️ не підключений (оформлення буде простим)"
+            gpt = "✅ підключений" if self.text_ready() else "⚠️ не підключений (оформлення буде простим)"
+            gpt = f"{gpt} — {esc(self.text.label)} ({esc(self.text.model)})"
             return ("📝 <b>Пости</b>\nВиберіть рубрику — я попрошу текст і оформлю його.\n"
-                    f"ChatGPT: {gpt}\n{esc(self.image_status())}"), kb(rows)
+                    f"Текстова модель: {gpt}\n{esc(self.image_status())}"), kb(rows)
 
         if name == "kinds":
             rows = [[(f"{C.KINDS[i].emoji} {C.KINDS[i].name}", f"pm:cfg:{i}")] for i in C.ORDER]
@@ -429,8 +493,11 @@ class PostsMixin:
             p = C.day_photo()
             hint = ("\n\n📅 Фото на сьогодні: " + (f"знайдено ({p.name})" if p else
                     "немає у папці — надішліть його після тексту або згенеруємо картинку."))
-        if not self.oai_ready():
-            hint += "\n\n⚠️ Ключ OpenAI не заданий: оформлю текст простими засобами, без аналізу стилю."
+        if k.local_first:
+            hint += ("\n\nℹ️ Текст оформлю простими засобами. Кнопка «Оформити з "
+                     f"{self.text_label()}» під чернеткою зробить це розумніше.") if self.text_ready() else ""
+        if not self.text_ready():
+            hint += f"\n\n⚠️ {self.text.not_ready_hint()}: оформлю текст простими засобами, без аналізу стилю."
         await ctx.bot.send_message(chat_id, f"{k.emoji} <b>{esc(k.name)}</b>\n\n{esc(k.ask)}{hint}"
                                             "\n\n/cancel — скасувати.", parse_mode=ParseMode.HTML)
 
@@ -443,6 +510,10 @@ class PostsMixin:
             rows.append([("🎨 Промт картинки", f"p:prompt:{did}"), ("🖌 Згенерувати картинку", f"p:gen:{did}")])
         else:
             rows.append([("🎨 Промт картинки", f"p:prompt:{did}")])
+        if k.output == "post" and self.text_ready():
+            rows.append([(f"✨ Оформити з {self.text_label()}", f"p:fmt:{did}")])
+        if k.output == "card" and self.image_ready():
+            rows.append([(f"🎨 Картинка з текстом у {self.image_label()}", f"p:gentext:{did}")])
         line = []
         if k.output == "card":
             line.append(("✂️ Скоротити текст", f"p:short:{did}"))
@@ -455,33 +526,52 @@ class PostsMixin:
         rows.append([("💾 У зразки стилю", f"p:sample:{did}"), ("✖️ Закрити", "x")])
         return kb(rows)
 
-    async def send_draft(self, ctx, chat_id: int, uid: int, did: str, note: str = ""):
-        """Показує чернетку: пост текстом (+фото дня) або листівку."""
+    async def send_draft(self, ctx, chat_id: int, uid: int, did: str, note: str = "",
+                         photo: tuple[bytes, str] | None = None):
+        """Показує чернетку: пост текстом (+ картинка) або листівку.
+
+        photo — готове зображення (data, ім'я файла): згенерована картинка або фото дня.
+        Якщо текст оформлювала модель, **фрагменти** стають жирними (extra.html)."""
         d = self.db.draft(did)
         if not d:
             return await ctx.bot.send_message(chat_id, "Чернетку не знайдено — почніть рубрику заново.")
         k = C.KINDS[d["kind"]]
-        text = d["text"]
         if k.output == "card":
             return await self.send_draft_card(ctx, chat_id, uid, d, note)
-        photo = C.day_photo() if k.use_day_photo else None
+        text = d["text"]
+        html_mode = bool(json.loads(d["extra"] or "{}").get("html"))
+        day = None
+        if photo is None and k.use_day_photo:
+            day = C.day_photo()
+            if day:
+                try:
+                    photo = (day.read_bytes(), day.name)
+                except OSError as e:
+                    log.info("фото дня %s не прочиталося: %s", day.name, e)
+                    photo, day = None, None
         parts = C.split_for_telegram(text, bool(photo))
+        kw = {"parse_mode": ParseMode.HTML} if html_mode else {}
+
+        def body(part: str) -> str:
+            return C.post_html(part) if html_mode else part
+
+        def markup(last: bool):
+            return self.draft_kb(d) if last else None
+
         try:
             if photo:
-                with photo.open("rb") as fh:
-                    await ctx.bot.send_photo(chat_id, InputFile(fh, filename=photo.name), caption=parts[0],
-                                             reply_markup=self.draft_kb(d) if len(parts) == 1 else None)
+                await ctx.bot.send_photo(chat_id, InputFile(io.BytesIO(photo[0]), filename=photo[1]),
+                                         caption=body(parts[0]), reply_markup=markup(len(parts) == 1), **kw)
             else:
-                await ctx.bot.send_message(chat_id, parts[0],
-                                           reply_markup=self.draft_kb(d) if len(parts) == 1 else None)
+                await ctx.bot.send_message(chat_id, body(parts[0]), reply_markup=markup(len(parts) == 1), **kw)
         except BadRequest as e:
             log.info("не вдалося надіслати пост: %s", e)
             await ctx.bot.send_message(chat_id, parts[0])
-        for i, p in enumerate(parts[1:], 1):
-            await ctx.bot.send_message(chat_id, p, reply_markup=self.draft_kb(d) if i == len(parts) - 1 else None)
-        tail = note or ("📅 Фото на сьогодні додано." if photo else
+        for i, part in enumerate(parts[1:], 1):
+            await ctx.bot.send_message(chat_id, body(part), reply_markup=markup(i == len(parts) - 1), **kw)
+        tail = note or ("📅 Фото на сьогодні додано." if day else
                         ("📅 Фото на сьогодні у папці немає — надішліть його кнопкою «Фото дня» або згенеруйте картинку."
-                         if k.use_day_photo else ""))
+                         if k.use_day_photo and photo is None else ""))
         if tail:
             await ctx.bot.send_message(chat_id, tail, parse_mode=ParseMode.HTML)
 
@@ -504,16 +594,18 @@ class PostsMixin:
                                      caption=caption, reply_markup=self.draft_kb(d))
         self.db.add_render(chat_id, m.message_id, uid, d["text"], title)
 
-    async def make_draft(self, ctx, chat_id: int, uid: int, kind_id: str, source: str, *, compose: bool = False):
+    async def make_draft(self, ctx, chat_id: int, uid: int, kind_id: str, source: str, *, compose: bool = False,
+                         marks: bool = False):
+        """marks=True — оформлення моделлю з виділенням головного послання жирним."""
         k = C.KINDS[kind_id]
         await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
         wait = None
-        if self.oai_ready():
-            wait = await ctx.bot.send_message(chat_id, "⏳ Оформлюю текст…")
+        if self.text_ready() and (marks or compose or not k.local_first):
+            wait = await ctx.bot.send_message(chat_id, f"⏳ Оформлюю текст ({self.text_label()})…")
         try:
-            text, used = await self.build_text(uid, kind_id, source, compose=compose,
+            text, used = await self.build_text(uid, kind_id, source, compose=compose, marks=marks,
                                                extra=self.post_cfg(kind_id).get("extra", ""))
-        except O.OpenAIError as e:
+        except TX.TextError as e:
             if wait:
                 await self._del(ctx, chat_id, wait.message_id)
             text = C.local_format(k, source, self.post_cfg(kind_id).get("hashtags", "")) if not compose else ""
@@ -526,11 +618,26 @@ class PostsMixin:
             await self._del(ctx, chat_id, wait.message_id)
         if len(text) > MAX_POST_CHARS:
             text = text[:MAX_POST_CHARS].rstrip()
-        did = self.db.add_draft(uid, kind_id, source, text)
-        note = "" if used else "ℹ️ Оформлено без ChatGPT."
-        await self.send_draft(ctx, chat_id, uid, did, note)
+        did = self.db.add_draft(uid, kind_id, source, text, None, {"html": True} if marks and used else None)
+        if used and marks:
+            note = f"✨ Оформлено з {self.text_label()}: головне виділено жирним."
+        elif used:
+            note = ""
+        elif k.local_first:
+            note = (f"ℹ️ Оформлено простими засобами. Кнопка «Оформити з {self.text_label()}» зробить це розумніше."
+                    if self.text_ready() else "ℹ️ Оформлено простими засобами.")
+        else:
+            note = "ℹ️ Оформлено простими засобами."
         if self.oai_cfg().get("autosample", True) and used and k.output == "post":
-            self.db.add_sample(kind_id, text, uid)
+            self.db.add_sample(kind_id, C.plain(text), uid)
+        auto = k.auto_image and AUTO_IMAGE and self.image_ready() and self.image_quota_left(uid) > 0
+        if not auto:
+            await self.send_draft(ctx, chat_id, uid, did, note)
+            return did
+        if note:                                   # спершу коротка примітка, далі промт із тексту й картинка
+            await ctx.bot.send_message(chat_id, note, parse_mode=ParseMode.HTML)
+        if not await self.do_generate(ctx, chat_id, uid, did, from_text=True, quiet_fallback=True):
+            await self.send_draft(ctx, chat_id, uid, did)
         return did
 
     async def _del(self, ctx, chat_id: int, mid: int):
@@ -541,13 +648,34 @@ class PostsMixin:
 
     # ------------------------------------------------------------ генерація фону / картинки
 
-    async def do_generate(self, ctx, chat_id: int, uid: int, did: str):
+    async def do_generate(self, ctx, chat_id: int, uid: int, did: str, *, with_text: bool = False,
+                          from_text: bool = False, quiet_fallback: bool = False) -> bool:
+        """Малює картинку до чернетки. Повертає True, якщо показав результат користувачеві.
+
+        with_text=True  — модель домальовує в кадрі текст листівки (кнопка «Картинка з текстом»);
+        from_text=True  — промт складає модель за текстом посту (послання й настрій дня);
+        друге й дальші натискання «Згенерувати картинку» спершу оновлюють промт у моделі,
+        і лише тоді малюється нова картинка."""
         d = self.db.draft(did)
         if not d:
-            return await ctx.bot.send_message(chat_id, "Чернетку не знайдено.")
+            await ctx.bot.send_message(chat_id, "Чернетку не знайдено.")
+            return False
         k = C.KINDS[d["kind"]]
-        prompt = await self.ensure_prompt(uid, did)
+        started = json.loads(d["extra"] or "{}")
+        done = int(started.get("gen", 0))
+        # друге й дальші натискання оновлюють промт у моделі — крім випадку, коли промт написав сам користувач
+        again = done >= 1 and not with_text and self.text_ready() and not started.get("own")
+        wait = None
+        if (from_text or again) and self.text_ready():
+            wait = await ctx.bot.send_message(
+                chat_id, f"⏳ {'Оновлюю' if again else 'Складаю'} промт картинки ({self.text_label()})…")
+        try:
+            prompt = await self.ensure_prompt(uid, did, renew=again, from_text=from_text or again)
+        finally:
+            if wait:
+                await self._del(ctx, chat_id, wait.message_id)
         d = self.db.draft(did)                       # ensure_prompt міг оновити чернетку
+        extra = json.loads(d["extra"] or "{}")
         s = self.st(uid)
         try:
             w, h = R.parse_size(s["size"], "1280x782")
@@ -555,30 +683,46 @@ class PostsMixin:
             w, h = 1280, 782
         if k.output == "post":
             w, h = self.images.provider.post_size
-        meta = json.loads(d["extra"] or "{}").get("ip") or {}
+        meta = extra.get("ip") or {}
         prompt_id = meta.get("id", "") if meta.get("title") else ""      # свій промт — без категорії
         try:
             category = IP.load_library().get(prompt_id, {}).get("category_id", "") if prompt_id else ""
         except IP.PromptError:
             category = ""
+        draw_text, draw_style = self.draw_text_for(d, k, with_text)
         label = self.image_label()
         wait = await ctx.bot.send_message(chat_id, f"🖌 Малюю зображення через {label}… це може зайняти до хвилини.")
         await ctx.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
         try:
-            img = await self.gen_image(uid, prompt, w, h, kind=d["kind"], prompt_id=prompt_id, category=category)
+            img = await self.gen_image(uid, prompt, w, h, kind=d["kind"], prompt_id=prompt_id, category=category,
+                                       draw_text=draw_text, draw_style=draw_style)
         except IG.ImageGenError as e:
             await self._del(ctx, chat_id, wait.message_id)
             await ctx.bot.send_message(chat_id, f"⚠️ {esc(e)}", parse_mode=ParseMode.HTML)
-            return await self.image_fallback(ctx, chat_id, uid, d, prompt, e)
+            if quiet_fallback:
+                return False
+            await self.image_fallback(ctx, chat_id, uid, d, prompt, e)
+            return True
         data = img.data
         await self._del(ctx, chat_id, wait.message_id)
+        extra = json.loads(self.db.draft(did)["extra"] or "{}")
+        extra["gen"] = done + 1
+        self.db.update_draft(did, extra=extra)
         left = self.image_quota_left(uid)
         tail = f" Залишилось сьогодні: {left}." if left < 10 ** 5 else ""
-        if k.output == "post":
-            await ctx.bot.send_photo(chat_id, InputFile(io.BytesIO(data), filename="illustration" + Path(img.path).suffix),
-                                     caption=f"🖼 Картинка до посту.{tail}", reply_markup=self.draft_kb(d))
-            return
-        # для листівки: фон стає шаблоном, одразу малюємо листівку з текстом
+        note = f"🖼 Картинка від {label}.{tail}"
+        if img.draw_text:
+            note += f"\nНапис у кадрі: {esc(img.draw_text.replace(chr(10), ' / '))}"
+        if with_text:                                # текст уже всередині картинки — показуємо саму картинку
+            await ctx.bot.send_photo(
+                chat_id, InputFile(io.BytesIO(data), filename=f"card-{d['kind']}{Path(img.path).suffix}"),
+                caption=note, reply_markup=self.draft_kb(self.db.draft(did)), parse_mode=ParseMode.HTML)
+            return True
+        if k.output == "post":                       # картинка + оформлений текст посту під нею
+            await self.send_draft(ctx, chat_id, uid, did, note=note,
+                                  photo=(data, "illustration" + Path(img.path).suffix))
+            return True
+        # для листівки: фон стає шаблоном, одразу малюємо листівку з текстом внутрішнім рендером
         name = f"{k.emoji} {dt.date.today():%d.%m} {time.strftime('%H:%M')}"
         try:
             t = await asyncio.to_thread(self.store.create, name, data, self.post_cfg(d["kind"])["template"])
@@ -586,14 +730,32 @@ class PostsMixin:
             cfg.update(owner=uid, generated=True, prompt=prompt[:900])
             t = self.store.update(t.id, cfg)
         except (R.RenderError, KeyError) as e:
-            return await ctx.bot.send_message(chat_id, f"⚠️ Зображення не вдалося зберегти: {esc(e)}",
-                                              parse_mode=ParseMode.HTML)
+            await ctx.bot.send_message(chat_id, f"⚠️ Зображення не вдалося зберегти: {esc(e)}",
+                                       parse_mode=ParseMode.HTML)
+            return False
         self.cleanup_generated(uid)
-        extra = json.loads(d["extra"] or "{}")
+        extra = json.loads(self.db.draft(did)["extra"] or "{}")
         extra["template"] = t.id
         self.db.update_draft(did, extra=extra)
         self.set_st(uid, template=t.id)
         await self.send_draft(ctx, chat_id, uid, did, note=f"🎨 Новий фон від {label}.{tail}")
+        return True
+
+    def draw_text_for(self, d, k, with_text: bool) -> tuple[str, str]:
+        """Що модель має намалювати в кадрі: текст листівки або сьогоднішня дата (стиль інший щодня)."""
+        if with_text:
+            extra = json.loads(d["extra"] or "{}")
+            title = str(extra.get("title") if extra.get("title") is not None
+                        else self.post_cfg(d["kind"]).get("title") or "").strip()
+            body = C.plain(d["text"]).replace("*", "").strip()
+            style = ("Place the inscription in the middle of the image as its main element: "
+                     + ("the first line as a small heading above it, " if title else "")
+                     + "the rest centred below, in a calm elegant face, in a colour that stays readable over "
+                       "the background; keep the background quiet behind the letters")
+            return (f"{title}\n{body}" if title else body), style
+        if k.date_in_image and k.output == "post":
+            return C.date_uk(), GP.date_draw_style(dt.date.today())
+        return "", ""
 
     def cleanup_generated(self, uid: int) -> None:
         mine = [t for t in self.store.all() if t.custom and t.config.get("generated") and t.config.get("owner") == uid]
@@ -661,7 +823,8 @@ class PostsMixin:
                 await msg.reply_text("Чернетка застаріла — почніть рубрику заново.")
                 return True
             extra = json.loads(d["extra"] or "{}")
-            if "ip" in extra:                         # свій промт: назву готового більше не показуємо
+            extra["own"] = True                       # свій промт модель більше не переписує
+            if "ip" in extra:                         # назву готового промту більше не показуємо
                 extra["ip"] = {k: v for k, v in extra["ip"].items() if k in ("id", "theme", "symbol")}
             self.db.update_draft(did, prompt=text.strip()[:3000], extra=extra)
             self.db.set_state(uid, None)
@@ -835,7 +998,7 @@ class PostsMixin:
                 await show("samples", parts[2])
                 return True
             if act == "style":
-                if not self.oai_ready():
+                if not self.text_ready():
                     await q.answer("Потрібен ключ OpenAI", show_alert=True)
                     return True
                 await q.answer("Аналізую стиль…")
@@ -868,7 +1031,7 @@ class PostsMixin:
                 await q.answer("Питаю OpenAI…")
                 try:
                     ms = await self.oai().models()
-                except O.OpenAIError as e:
+                except TX.TextError as e:
                     await ctx.bot.send_message(chat_id, f"⚠️ {esc(e)}", parse_mode=ParseMode.HTML)
                     return True
                 cache = {"text": [m for m in ms if m.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")) and "image" not in m],
@@ -889,7 +1052,7 @@ class PostsMixin:
                 await q.answer("Перевіряю…")
                 try:
                     res = await self.oai().check()
-                except O.OpenAIError as e:
+                except TX.TextError as e:
                     res = f"⚠️ {e}"
                 await ctx.bot.send_message(chat_id, esc(res), parse_mode=ParseMode.HTML)
                 return True
@@ -912,6 +1075,24 @@ class PostsMixin:
                 await q.answer("Роблю інший варіант…")
                 await self.make_draft(ctx, chat_id, uid, d["kind"], d["source"],
                                       compose=bool(C.KINDS[d["kind"]].compose and not d["source"].strip().endswith(".")))
+                return True
+            if act == "fmt":
+                if not self.text_ready():
+                    await q.answer(self.text.not_ready_hint(), show_alert=True)
+                    return True
+                await q.answer(f"Оформлюю з {self.text_label()}…")
+                try:
+                    await q.edit_message_reply_markup(None)
+                except BadRequest:
+                    pass
+                await self.make_draft(ctx, chat_id, uid, d["kind"], d["source"], marks=True)
+                return True
+            if act == "gentext":
+                if not self.image_ready():
+                    await q.answer(self.images.provider.not_ready_hint(), show_alert=True)
+                    return True
+                await q.answer("Малюю картинку з текстом…")
+                await self.do_generate(ctx, chat_id, uid, did, with_text=True)
                 return True
             if act == "src":
                 await q.answer()
@@ -959,12 +1140,12 @@ class PostsMixin:
             if act == "short":
                 await q.answer("Скорочую…")
                 text = d["text"]
-                if self.oai_ready():
+                if self.text_ready():
                     try:
                         sys_, user = C.shorten_messages(text, 25)
-                        text = C.strip_markup(await self.oai().chat(sys_, user, max_tokens=400))
+                        text = C.strip_markup(await self.text.chat(sys_, user, max_tokens=400))
                         self.db.add_usage(uid, "text")
-                    except O.OpenAIError as e:
+                    except TX.TextError as e:
                         await ctx.bot.send_message(chat_id, f"⚠️ {esc(e)} Скоротив простіше.", parse_mode=ParseMode.HTML)
                         text = C.shorten_local(text, 25)
                 else:

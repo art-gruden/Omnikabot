@@ -430,8 +430,7 @@ class CardBot(PostsMixin):
                     f"Хто користується ботом: <b>{acc}</b>\n"
                     f"Хто додає шаблони: <b>{add}</b>\n"
                     f"Дозволених користувачів: {n}\n"
-                    f"ChatGPT: <b>{'підключений' if self.oai_ready() else 'не підключений'}</b>\n"
-                    f"{esc(self.image_status())}\n\n"
+                    f"{esc(self.text_status())}\n{esc(self.image_status())}\n\n"
                     "«Мої налаштування → типові»: нові користувачі отримають ваші шаблон, заголовок, розмір тощо.")
             rows = [[("🤖 OpenAI (ChatGPT)", "m:oai")],
                     [(f"👥 Бот: {acc}", "a:mode"), (f"🗂 Шаблони: {add}", "a:addmode")],

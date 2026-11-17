@@ -1,4 +1,4 @@
-"""Імітація Gemini API (generateContent та interactions) для тестів без мережі."""
+"""Імітація Gemini API (generateContent та interactions), текст і зображення, для тестів без мережі."""
 from __future__ import annotations
 
 import asyncio
@@ -35,33 +35,82 @@ class FakeGemini:
         self.calls: list[dict] = []
         # Черга сценаріїв для наступних викликів; порожня — звичайна вдала відповідь.
         #   ("status", 503, "текст") | ("noimage", "NO_IMAGE") | ("slow", секунд) | ("thought",) | ("block", "SAFETY")
-        self.script: list[tuple] = []
+        self.script: list[tuple] = []          # для запитів на зображення
+        self.text_script: list[tuple] = []     # для текстових запитів
+        # відповіді на текстові запити (вибір за системною інструкцією)
+        self.text_reply = "Доброго ранку, друзі! ☀️\n\nНехай цей день буде світлим.\n\n💛 Усмішки вам і тепла."
+        self.marks_reply = ("Доброго ранку, друзі! ☀️\n\n**Нехай цей день буде світлим.**\n\n💛 Усмішки вам і тепла.")
+        self.prompt_reply = ("Soft watercolor sunrise over calm hills, warm golden light, gentle pink and amber "
+                             "gradients, airy mist, serene low-detail upper area, horizontal composition.")
+        self.from_text_reply = ("A quiet lakeside clearing at first light, two smooth stones at the water edge, "
+                                "copper leaves drifting on the surface, warm low sun behind bare birches, "
+                                "calm empty sky in the upper third, serene and grateful mood.")
+        self.theme_reply = "THEME: gratitude and quiet morning light\nSYMBOL: a single white feather"
+        self.style_reply = "Тон теплий і сердечний, звертання «друзі», 3 абзаци, емодзі на початку абзаців."
         self.lock = threading.Lock()
         self.app = self._app()
         self.server = None
 
-    def _next(self):
+    def _next(self, what: str = "image"):
+        q = self.script if what == "image" else self.text_script
         with self.lock:
-            return self.script.pop(0) if self.script else None
+            return q.pop(0) if q else None
 
     def _app(self) -> FastAPI:
         app = FastAPI()
 
+        def wants_image(body: dict) -> bool:
+            cfg = (body.get("generationConfig") or {}).get("responseModalities") or []
+            return "IMAGE" in cfg or (body.get("response_format") or {}).get("type") == "image"
+
+        def text_for(body: dict) -> str:
+            if "system_instruction" in body:                      # interactions
+                sys_prompt = body["system_instruction"]
+            else:
+                sys_prompt = " ".join(p.get("text", "") for p in (body.get("systemInstruction") or {}).get("parts", []))
+            low = sys_prompt.lower()
+            if "аналізуєш стиль" in low:
+                return self.style_reply
+            if "THEME:" in sys_prompt and "SYMBOL:" in sys_prompt:
+                return self.theme_reply
+            if "генератора зображень gemini" in low:              # промт за текстом посту
+                return self.from_text_reply
+            if "промт" in low and "зображен" in low:
+                return self.prompt_reply
+            if "двома зірочками" in low:
+                return self.marks_reply
+            return self.text_reply
+
         async def handle(request: Request, api: str, model: str):
             body = await request.json()
             key = request.headers.get("x-goog-api-key", "")
+            what = "image" if wants_image(body) else "text"
             with self.lock:
-                self.calls.append({"api": api, "model": model, "body": body, "key": key,
-                                   "url": str(request.url)})
+                self.calls.append({"api": api, "model": model, "body": body, "key": key, "what": what,
+                                   "url": str(request.url), "revision": request.headers.get("api-revision", "")})
             if key != KEY:
                 return JSONResponse({"error": {"code": 400, "status": "INVALID_ARGUMENT",
                                                "message": "API key not valid. Please pass a valid API key."}}, 400)
-            step = self._next()
+            step = self._next(what)
             if step and step[0] == "status":
                 return JSONResponse({"error": {"code": step[1], "message": step[2] if len(step) > 2 else "error",
                                                "status": "UNAVAILABLE"}}, step[1])
             if step and step[0] == "slow":
                 await asyncio.sleep(step[1])
+            if what == "text":
+                if step and step[0] == "notext":
+                    return JSONResponse({"candidates": [{"content": {"parts": []},
+                                                         "finishReason": step[1] if len(step) > 1 else "MAX_TOKENS"}]})
+                out = text_for(body)
+                if api == "interactions":
+                    return JSONResponse({"id": "t1", "status": "completed", "steps": [
+                        {"type": "model_output", "content": [{"type": "text", "text": out}]}]})
+                parts = [{"text": out}]
+                if step and step[0] == "thought":
+                    parts.insert(0, {"thought": True, "text": "думаю над відповіддю"})
+                return JSONResponse({"candidates": [{"content": {"role": "model", "parts": parts},
+                                                     "finishReason": "STOP"}],
+                                     "usageMetadata": {"totalTokenCount": 220}})
             if api == "interactions":
                 fmt = body.get("response_format") or {}
                 png = base64.b64encode(make_png(fmt.get("aspect_ratio", "1:1"), fmt.get("image_size", "1K"))).decode()
@@ -115,6 +164,10 @@ class FakeGemini:
     def mark(self) -> int:
         with self.lock:
             return len(self.calls)
+
+    def of(self, what: str, since: int = 0) -> list[dict]:
+        with self.lock:
+            return [c for c in self.calls[since:] if c["what"] == what]
 
     def since(self, n: int) -> list[dict]:
         with self.lock:
