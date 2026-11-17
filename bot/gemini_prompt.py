@@ -143,6 +143,19 @@ def strip_literal_text(prompt: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", out).strip()
 
 
+CARD_TEXT_SHARE = "70–80%"
+
+
+def card_draw_style(has_title: bool = False) -> str:
+    """Стиль напису для листівки: текст — головний елемент кадру, а не підпис до сцени."""
+    return ("Make the inscription the subject of the image, not a caption on it: the text block fills about "
+            f"{CARD_TEXT_SHARE} of the frame — roughly three quarters of the width and a similar share of the height — "
+            "optically centred, with the scene behind it reduced to a quiet, low-contrast background. "
+            + ("Set the first line as a smaller heading above the rest, both inside that block. " if has_title else "")
+            + "Use a calm elegant face and a colour that stays readable over the background; keep even margins "
+              "and never crop or cut off a letter")
+
+
 def date_draw_style(d: dt.date) -> str:
     """Опис стилю напису з датою: розмір, шрифт і колір, інші щодня."""
     n = d.toordinal()

@@ -474,7 +474,8 @@ async def scenario(cb):
     fake.send_text(A, "/morning Нехай світло наповнює мої думки, слова та вчинки щодня.")
     card = (await wait(m, is_("sendPhoto"), timeout=30, label="листівка"))["result"]
     c = [x for x in fake.since(m) if x["method"] == "sendPhoto"][0]
-    check(img_size(c) == (1280, 782) and not gem.of("image", n), "листівка зроблена без генератора зображень")
+    check(img_size(c) == (1280, 782) and not gem.of("image", n) and not gem.of("text", n),
+          "листівку зроблено без Gemini: і фон, і текст — внутрішнім рендером")
     check(any("Картинка з текстом у Gemini" in b["text"] for b in buttons(card)), "є кнопка перегенерації в Gemini")
 
     n = gem.mark()
@@ -482,9 +483,11 @@ async def scenario(cb):
     fake.press(A, card, btn(card, "Картинка з текстом"))
     c = await wait(m, is_("sendPhoto"), timeout=40, label="картинка з текстом")
     sent = prompt_of(gem.of("image", n)[0])
-    check("ЕНЕРГОЗАВАНТАЖЕННЯ" in sent and "Нехай цей день буде світлим" in sent, "у промті заголовок і текст листівки")
+    check("ЕНЕРГОЗАВАНТАЖЕННЯ" in sent and "Нехай світло наповнює мої думки" in sent,
+          "у промті заголовок і текст листівки")
     check("overrides the rules above that forbid text" in sent, "заборону тексту знято саме для цього напису")
-    check("in the middle of the image" in sent, "напис — у центрі кадру")
+    check(GP.CARD_TEXT_SHARE in sent and "subject of the image, not a caption" in sent,
+          f"напис займає {GP.CARD_TEXT_SHARE} кадру")
     check(img_size(c) == (1376, 768) and "Напис у кадрі" in (c["params"].get("caption") or ""),
           "надіслано саме картинку від Gemini")
     check(len(cb.store.all()) == tpl_before, "картинка з текстом не стає шаблоном листівки")

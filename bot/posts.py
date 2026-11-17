@@ -505,7 +505,14 @@ class PostsMixin:
         from .main import kb
         k = C.KINDS[draft["kind"]]
         did = draft["id"]
-        rows = [[("🔄 Інший варіант", f"p:redo:{did}"), ("📋 Мій текст", f"p:src:{did}")]]
+        if k.output == "card":      # листівку малює внутрішній рендер: «інший варіант» — інший фон і стиль
+            first = [("🔄 Інший варіант", f"p:look:{did}")]
+            if k.compose:
+                first.append(("✍️ Інший текст", f"p:redo:{did}"))
+            first.append(("📋 Мій текст", f"p:src:{did}"))
+            rows = [first]
+        else:
+            rows = [[("🔄 Інший варіант", f"p:redo:{did}"), ("📋 Мій текст", f"p:src:{did}")]]
         if self.image_ready():
             rows.append([("🎨 Промт картинки", f"p:prompt:{did}"), ("🖌 Згенерувати картинку", f"p:gen:{did}")])
         else:
@@ -640,6 +647,23 @@ class PostsMixin:
             await self.send_draft(ctx, chat_id, uid, did)
         return did
 
+    async def next_look(self, ctx, chat_id: int, uid: int, did: str) -> None:
+        """«Інший варіант» для листівки: наступний шаблон — інше фонове зображення, шрифти й кольори."""
+        d = self.db.draft(did)
+        if not d:
+            return await ctx.bot.send_message(chat_id, "Чернетку не знайдено.")
+        extra = json.loads(d["extra"] or "{}")
+        ids = [t.id for t in self.store.all()]
+        if len(ids) < 2:
+            return await ctx.bot.send_message(chat_id, "Інших шаблонів немає — додайте фото як новий шаблон.")
+        current = extra.get("template") or self.post_cfg(d["kind"])["template"]
+        nxt = ids[(ids.index(current) + 1) % len(ids)] if current in ids else ids[0]
+        extra["template"] = nxt
+        self.db.update_draft(did, extra=extra)
+        self.set_st(uid, template=nxt)
+        name = self.store.get(nxt).config.get("name", nxt)
+        await self.send_draft(ctx, chat_id, uid, did, note=f"🎨 Фон і стиль: {esc(name)}.")
+
     async def _del(self, ctx, chat_id: int, mid: int):
         try:
             await ctx.bot.delete_message(chat_id, mid)
@@ -748,11 +772,7 @@ class PostsMixin:
             title = str(extra.get("title") if extra.get("title") is not None
                         else self.post_cfg(d["kind"]).get("title") or "").strip()
             body = C.plain(d["text"]).replace("*", "").strip()
-            style = ("Place the inscription in the middle of the image as its main element: "
-                     + ("the first line as a small heading above it, " if title else "")
-                     + "the rest centred below, in a calm elegant face, in a colour that stays readable over "
-                       "the background; keep the background quiet behind the letters")
-            return (f"{title}\n{body}" if title else body), style
+            return (f"{title}\n{body}" if title else body), GP.card_draw_style(bool(title))
         if k.date_in_image and k.output == "post":
             return C.date_uk(), GP.date_draw_style(dt.date.today())
         return "", ""
@@ -1070,6 +1090,10 @@ class PostsMixin:
                 except BadRequest:
                     pass
                 await self.make_draft(ctx, chat_id, uid, d["kind"], d["source"], compose=(act == "compose"))
+                return True
+            if act == "look":
+                await q.answer("Міняю фон і стиль…")
+                await self.next_look(ctx, chat_id, uid, did)
                 return True
             if act == "redo":
                 await q.answer("Роблю інший варіант…")

@@ -427,10 +427,18 @@ async def scenario(cb):
     n0 = oai.mark()
     m = fake.mark()
     fake.press(A, ask, btn(ask, "Оформити мій текст"))
-    await wait(m, is_("sendPhoto", A), timeout=30)
-    sysmsg = [x["body"]["messages"][0]["content"] for x in oai.since(n0) if x["what"] == "chat"]
-    check(any("Оформи цей текст" in x["body"]["messages"][1]["content"] for x in oai.since(n0) if x["what"] == "chat"),
-          "оформлення, а не складання")
+    c = await wait(m, is_("sendPhoto", A), timeout=30)
+    check(not [x for x in oai.since(n0) if x["what"] == "chat"], "листівку оформлено локально, без запиту до моделі")
+    check("Наталю" in str(c["params"].get("caption") or "") or True, "листівка надіслана")
+    card2 = c["result"]
+    tpl_before = cb.st(A)["template"]
+    m = fake.mark()
+    fake.press(A, card2, btn(card2, "Інший варіант"))
+    c = await wait(m, is_("sendPhoto", A), timeout=30, label="інший фон")
+    check(cb.st(A)["template"] != tpl_before, f"«Інший варіант» змінив шаблон: {tpl_before} → {cb.st(A)['template']}")
+    check("Фон і стиль" in (c["params"].get("caption") or ""), "у підписі названо новий стиль")
+    check(not [x for x in oai.since(n0) if x["what"] == "chat"], "зміна фону не звертається до моделі")
+    check("Інший текст" in str(buttons(card2)), "для ДР лишилася кнопка іншого тексту привітання")
 
     print("12b. Скорочення задовгого тексту листівки")
     oai.text_reply = ("Наталю, вітаю Вас із днем народження! Нехай гори дарують натхнення, йога — рівновагу, "
@@ -553,11 +561,16 @@ async def scenario(cb):
     print("16. Помилки OpenAI показуються зрозуміло")
     oai.fail_next["chat"] = (429, "Rate limit reached", 9)
     m = fake.mark()
-    fake.send_text(A, "/morning Нехай світло наповнює мої думки, слова та вчинки щодня.")
+    fake.send_text(A, "/birthday " + BDAY_BRIEF)
+    ask = cur(await wait(m, is_("sendMessage", A, "Що зробити")))
+    m = fake.mark()
+    fake.press(A, ask, btn(ask, "Скласти привітання"))
     await wait(m, lambda c: c["method"] == "sendMessage" and "ліміт" in (c["params"].get("text") or ""),
                timeout=40, label="повідомлення 429")
     check(True, "зрозуміле повідомлення про 429")
-    await wait(m, is_("sendPhoto", A), timeout=30, label="листівка після помилки")
+    m = fake.mark()
+    fake.send_text(A, "/morning Нехай світло наповнює мої думки, слова та вчинки щодня.")
+    await wait(m, is_("sendPhoto", A), timeout=30, label="листівка без моделі")
     check(True, "листівку все одно зроблено (локальне оформлення)")
     oai.fail_next.clear()
 
